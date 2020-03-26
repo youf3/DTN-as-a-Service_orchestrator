@@ -1,7 +1,8 @@
 image: python:3.6.10-slim
 
-stages:
+stages:    
     - test
+    - deploy
 
 test:
     stage: test
@@ -10,7 +11,7 @@ test:
         - python orchestrator/test.py
 
 build_image:
-    dependencies: []
+    stage: test
     tags: 
         - build_docker
     script:
@@ -18,6 +19,17 @@ build_image:
         - docker build -t icair/dtnaas:orchestrator .
         - docker pull icair/dtnaas:agent
         - mkdir data; echo "hello_world!" > data/hello_world
-        - docker run -t -p5000:5000 -v "$(pwd)"/data:/data icair/dtnaas:agent
-        - docker run -t icair/dtnaas:orchestrator agorchestratorent/test.py
+        - docker run --rm -d --name=daas_agent --network="host" -v "$(pwd)"/data:/data icair/dtnaas:agent
+        - docker run -t --network="host" icair/dtnaas:orchestrator orchestrator/test.py
         - docker push icair/dtnaas:orchestrator
+    after_script:
+        - docker stop daas_agent
+
+deploy:
+    stage: deploy
+    tags: 
+        - deploy_orchestrator
+    before_script:
+        - docker stop daas_orchestrator || true
+    script:
+        - docker run -d --rm --name=daas_orchestrator --network="host" icair/dtnaas:orchestrator        
