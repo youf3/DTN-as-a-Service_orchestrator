@@ -3,9 +3,8 @@ from flask_testing import TestCase
 import os
 import app
 import unittest
-import json
 
-class AgentTest(TestCase):
+class OrchestratorTest(TestCase):
 
     def create_app(self):
         app.app.config['TESTING'] = True
@@ -18,11 +17,9 @@ class AgentTest(TestCase):
             os.remove('orchestrator/test.db')
         from app import db
         db.create_all()
-        pass
 
     def tearDown(self):
         os.remove('orchestrator/test.db')
-        pass
 
     def test_running(self):
         response = self.client.get('/')
@@ -70,42 +67,7 @@ class AgentTest(TestCase):
         response = self.client.post('/DTN/', json=data)
         result = response.get_json()
         assert response.status_code == 400
-        assert result == {'message' : 'Unable to add DTN'}
-
-    def test_nuttcp_transfer(self):
-        data = {
-            'name' : 'testDTN1',
-            'man_addr' : '127.0.0.1:5000',
-            'data_addr' : '127.0.0.1',
-            'username' : 'nobody'
-        }
-
-        response = self.client.post('/DTN/',json=data)
-        result = response.get_json()
-        assert result == {'id' : 1}
-
-        data = {
-            'name' : 'testDTN2',
-            'man_addr' : 'localhost:5000',
-            'data_addr' : 'localhost',
-            'username' : 'nobody'
-        }
-
-        response = self.client.post('/DTN/',json=data)
-        result = response.get_json()
-        assert result == {'id' : 2}
-
-        data = {
-            'sender' : 1,
-            'receiver' : 2,
-            'port' : 5001,
-            'file' : 'hello_world',
-            'dport' : 6001
-        }
-
-        response = self.client.post('/transfer/nuttcp',json=data)
-        result = response.get_json()
-        assert result == {'result' : True}
+        assert result == {'message' : 'Unable to add DTN'}    
 
 if __name__ == '__main__':
-    unittest.main()
+    unittest.main(verbosity=2)
