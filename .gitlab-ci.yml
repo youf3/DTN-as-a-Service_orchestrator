@@ -25,10 +25,8 @@ build_image:
     after_script:
         - docker stop daas_agent
 
-deploy:
+.deploy_image:
     stage: deploy
-    tags: 
-        - deploy_orchestrator
     before_script:
         - docker stop daas_orchestrator || true
     script:
