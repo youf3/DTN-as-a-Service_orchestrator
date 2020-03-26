@@ -1,0 +1,23 @@
+image: python:3.6.10-slim
+
+stages:
+    - test
+
+test:
+    stage: test
+    script:         
+        - pip install -r orchestrator/requirements.txt
+        - python orchestrator/test.py
+
+build_image:
+    dependencies: []
+    tags: 
+        - build_docker
+    script:
+        - echo "$REGI_PASS" | docker login -u "$REGI_USER" --password-stdin
+        - docker build -t icair/dtnaas:orchestrator .
+        - docker pull icair/dtnaas:agent
+        - mkdir data; echo "hello_world!" > data/hello_world
+        - docker run -t -p5000:5000 -v "$(pwd)"/data:/data icair/dtnaas:agent
+        - docker run -t icair/dtnaas:orchestrator agorchestratorent/test.py
+        - docker push icair/dtnaas:orchestrator
