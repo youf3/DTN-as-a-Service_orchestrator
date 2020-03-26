@@ -15,7 +15,7 @@ build_image:
     tags: 
         - build_docker
     script:
-        - echo "$REGI_PASS" | docker login -u "$REGI_USER" --password-stdin
+        - echo "$REGI_PASS" | docker login --username "$REGI_USER" --password-stdin
         - docker build -t icair/dtnaas:orchestrator .
         - docker pull icair/dtnaas:agent
         - mkdir data; echo "hello_world!" > data/hello_world
