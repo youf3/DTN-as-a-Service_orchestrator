@@ -19,15 +19,18 @@ build_image:
         - docker build -t icair/dtnaas:orchestrator .
         - docker pull icair/dtnaas:agent
         - mkdir data; echo "hello_world!" > data/hello_world
-        - docker run --rm -d --name=daas_agent --network="host" -v "$(pwd)"/data:/data icair/dtnaas:agent
+        - docker run --rm -d --name=daas_test_agent -p 8000:5000/tcp -v "$(pwd)"/data:/data icair/dtnaas:agent
         - docker run -t --network="host" icair/dtnaas:orchestrator orchestrator/test.py
+        - docker run -t --network="host" icair/dtnaas:orchestrator orchestrator/transfer_test.py
         - docker push icair/dtnaas:orchestrator
     after_script:
-        - docker stop daas_agent
+        - docker stop daas_test_agent || true
 
 .deploy_image:
     stage: deploy
     before_script:
         - docker stop daas_orchestrator || true
     script:
-        - docker run -d --rm --name=daas_orchestrator --network="host" icair/dtnaas:orchestrator        
+        - docker run -d --rm --name=daas_orchestrator --network="host" icair/dtnaas:orchestrator
+
+include: 'CI/.gitlab-ci-servers.yml'
