@@ -1,0 +1,4 @@
+deploy_r740xd1:
+    extends: .deploy_image
+    tags:
+      - r740xd1
