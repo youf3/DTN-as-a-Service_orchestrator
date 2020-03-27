@@ -25,8 +25,8 @@ class TransferTest(TestCase):
     def test_nuttcp_transfer(self):
         data = {
             'name' : 'testDTN1',
-            'man_addr' : '127.0.0.1:8000',
-            'data_addr' : '127.0.0.1',
+            'man_addr' : '172.17.0.1:8000',
+            'data_addr' : 'localhost',
             'username' : 'nobody'
         }
 
@@ -36,7 +36,7 @@ class TransferTest(TestCase):
 
         data = {
             'name' : 'testDTN2',
-            'man_addr' : 'localhost:8000',
+            'man_addr' : '172.17.0.1:8000',
             'data_addr' : 'localhost',
             'username' : 'nobody'
         }

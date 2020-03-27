@@ -77,8 +77,8 @@ if __name__ == '__main__':
 class DTN(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(15), unique=False, nullable=False)
-    man_addr = db.Column(db.String(15), unique=True, nullable=False)
-    data_addr = db.Column(db.String(15), unique=True, nullable=False)
+    man_addr = db.Column(db.String(80), unique=False, nullable=False)
+    data_addr = db.Column(db.String(80), unique=False, nullable=False)
     username = db.Column(db.String(80), unique=False, nullable=False)
 
     def __repr__(self):
