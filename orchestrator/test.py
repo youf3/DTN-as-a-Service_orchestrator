@@ -55,19 +55,19 @@ class OrchestratorTest(TestCase):
         result = response.get_json()
         assert result == {'id' : 1}
 
-    def test_add_twice(self):
-        self.test_add_DTN()
-        data = {
-            'name' : 'testDTN1',
-            'man_addr' : '192.168.1.1',
-            'data_addr' : '192.168.2.1',
-            'username' : 'nobody'
-        }
+    # def test_add_twice(self):
+    #     self.test_add_DTN()
+    #     data = {
+    #         'name' : 'testDTN1',
+    #         'man_addr' : '192.168.1.1',
+    #         'data_addr' : '192.168.2.1',
+    #         'username' : 'nobody'
+    #     }
         
-        response = self.client.post('/DTN/', json=data)
-        result = response.get_json()
-        assert response.status_code == 400
-        assert result == {'message' : 'Unable to add DTN'}    
+    #     response = self.client.post('/DTN/', json=data)
+    #     result = response.get_json()
+    #     assert response.status_code == 400
+    #     assert result == {'message' : 'Unable to add DTN'}    
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
