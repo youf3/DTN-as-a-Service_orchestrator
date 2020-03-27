@@ -55,7 +55,8 @@ def run_transfer(tool):
     data = request.get_json()
     sender_id = data.pop('sender')    
     receiver_id = data.pop('receiver')
-    #filename = data.pop('file')
+    srcfile = data.pop('srcfile')
+    dstfile = data.pop('dstfile')
     #port = data.pop('data')
 
     sender = DTN.query.get(sender_id)
@@ -63,11 +64,15 @@ def run_transfer(tool):
     receiver = DTN.query.get(receiver_id)
     
     try:
+        ## sender
+        data['file'] = srcfile
         response = requests.post('http://{}/sender/{}'.format(sender.man_addr, tool), json=data)
         if response.status_code != 200 or response.json()['result'] != True:
             abort(make_response(jsonify(message="Unable start sender"), 400))
         
+        ## receiver
         data['address'] = sender.data_addr
+        data['file'] = dstfile
         response = requests.post('http://{}/receiver/{}'.format(receiver.man_addr, tool), json=data)
         if response.status_code != 200 or response.json()['result'] != True:
             abort(make_response(jsonify(message="Unable start receiver"), 400))
