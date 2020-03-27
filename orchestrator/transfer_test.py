@@ -49,7 +49,8 @@ class TransferTest(TestCase):
             'sender' : 1,
             'receiver' : 2,
             'port' : 5001,
-            'file' : 'hello_world',
+            'srcfile' : 'hello_world',
+            'dstfile' : 'hello_world2',
             'dport' : 6001
         }
 
