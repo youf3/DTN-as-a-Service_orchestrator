@@ -12,6 +12,16 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 
+class DTN(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(15), unique=False, nullable=True)
+    man_addr = db.Column(db.String(80), unique=False, nullable=True)
+    data_addr = db.Column(db.String(80), unique=False, nullable=True)
+    username = db.Column(db.String(80), unique=False, nullable=True)
+
+    def __repr__(self):
+        return '<DTN %r>' % self.id
+
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
     target_DTN = DTN.query.get(id)
@@ -73,13 +83,3 @@ def run_transfer(tool):
 if __name__ == '__main__':
     app.run('0.0.0.0')
     pass
-
-class DTN(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(15), unique=False, nullable=False)
-    man_addr = db.Column(db.String(80), unique=False, nullable=False)
-    data_addr = db.Column(db.String(80), unique=False, nullable=False)
-    username = db.Column(db.String(80), unique=False, nullable=False)
-
-    def __repr__(self):
-        return '<DTN %r>' % self.id
