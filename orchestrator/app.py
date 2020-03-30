@@ -50,40 +50,62 @@ def delete_DTN(id):
 def check_running():
     return "The orchestrator is running"
 
-@app.route('/transfer/<string:tool>', methods=['POST'])
-def run_transfer(tool):
-    data = request.get_json()
-    sender_id = data.pop('sender')    
-    receiver_id = data.pop('receiver')
+@app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
+def transfer(tool,sender_id, receiver_id):
+    data = request.get_json()    
     srcfile = data.pop('srcfile')
-    dstfile = data.pop('dstfile')
-    #port = data.pop('data')
-
-    sender = DTN.query.get(sender_id)
-    
+    dstfile = data.pop('dstfile')    
+    sender = DTN.query.get(sender_id)    
     receiver = DTN.query.get(receiver_id)
+    resultset = []    
+
+    if type(srcfile) != list:
+        abort(make_response(jsonify(message="Malformed source file list"), 400))
+    if type(dstfile) != list:
+        abort(make_response(jsonify(message="Malformed destionation file list"), 400))
+    if len(srcfile) != len(dstfile):
+        abort(make_response(jsonify(message="Source and destination file sizes are not matching"), 400))
     
+    for i in range(len(srcfile)):
+        result = run_transfer(sender, receiver, srcfile[i], dstfile[i], tool, data)
+        resultset.append(result)
+    
+    for result in resultset:
+        wait_for_transfer(sender, receiver, tool, result)
+    return jsonify({'result' : True})
+
+def run_transfer(sender, receiver, srcfile, dstfile, tool, params):        
     try:
         ## sender
-        data['file'] = srcfile
-        response = requests.post('http://{}/sender/{}'.format(sender.man_addr, tool), json=data)
-        if response.status_code != 200 or response.json()['result'] != True:
+        params['file'] = srcfile
+        response = requests.post('http://{}/sender/{}'.format(sender.man_addr, tool), json=params)
+        result = response.json()
+        if response.status_code != 200 or result.pop('result') != True:
             abort(make_response(jsonify(message="Unable start sender"), 400))
         
         ## receiver
-        data['address'] = sender.data_addr
-        data['file'] = dstfile
-        response = requests.post('http://{}/receiver/{}'.format(receiver.man_addr, tool), json=data)
-        if response.status_code != 200 or response.json()['result'] != True:
+        result['address'] = sender.data_addr
+        result['file'] = dstfile
+        
+        response = requests.post('http://{}/receiver/{}'.format(receiver.man_addr, tool), json=result)
+        result = response.json()
+        if response.status_code != 200 or result.pop('result') != True:
             abort(make_response(jsonify(message="Unable start receiver"), 400))
     except requests.exceptions.ConnectionError:
         abort(make_response(jsonify(message="Unable to connect to DTN"), 503))
+    return result
 
-    port = data['port']
-    response = requests.get('http://{}/{}/{}/poll'.format(receiver.man_addr, tool, port), json=data)
-    if response.status_code != 200 or response.json()['return code'] != 0:
+def wait_for_transfer(sender, receiver, tool, result):
+
+    result['node'] = 'receiver'
+    response = requests.get('http://{}/{}/poll'.format(receiver.man_addr, tool), json=result)
+    if not (response.status_code == 200 and response.json()['return code'] == 0):
         abort(make_response(jsonify(message="Transfer has failed"), 400))
-    return jsonify({'result' : True})
+
+    result['node'] = 'sender'
+    response = requests.get('http://{}/{}/poll'.format(sender.man_addr, tool), json=result)
+    if not (response.status_code == 200 and response.json()['return code'] == 0):
+        abort(make_response(jsonify(message="Transfer has failed"), 400))
 
 if __name__ == '__main__':
     app.run('0.0.0.0')

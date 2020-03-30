@@ -18,7 +18,7 @@ build_image:
         - echo "$REGI_PASS" | docker login --username "$REGI_USER" --password-stdin
         - docker build -t icair/dtnaas:orchestrator .
         - docker pull icair/dtnaas:agent
-        - mkdir data; echo "hello_world!" > data/hello_world
+        - mkdir data; echo "hello_world!" > data/hello_world; echo "hello_world!" > data/hello_world3
         - docker run --rm -d --name=daas_test_agent -p 8000:5000/tcp -v "$(pwd)"/data:/data icair/dtnaas:agent
         - docker run -t icair/dtnaas:orchestrator orchestrator/test.py
         - docker run -t icair/dtnaas:orchestrator orchestrator/transfer_test.py
@@ -29,6 +29,8 @@ build_image:
 
 .deploy_image:
     stage: deploy
+    only:
+        - master
     before_script:
         - docker stop daas_orchestrator || true
     script:
