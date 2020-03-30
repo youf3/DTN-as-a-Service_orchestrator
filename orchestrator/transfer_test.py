@@ -45,16 +45,44 @@ class TransferTest(TestCase):
         result = response.get_json()
         assert result == {'id' : 2}
 
-        data = {
-            'sender' : 1,
-            'receiver' : 2,
-            'port' : 5001,
-            'srcfile' : 'hello_world',
-            'dstfile' : 'hello_world2',
-            'dport' : 6001
+        data = {            
+            'srcfile' : ['hello_world'],
+            'dstfile' : ['hello_world2'],
         }
 
-        response = self.client.post('/transfer/nuttcp',json=data)
+        response = self.client.post('/transfer/nuttcp/1/2',json=data)
+        result = response.get_json()
+        assert result == {'result' : True}
+
+    def test_multiple_nuttcp_transfer(self):
+        data = {
+            'name' : 'testDTN1',
+            'man_addr' : '172.17.0.1:8000',
+            'data_addr' : 'localhost',
+            'username' : 'nobody'
+        }
+
+        response = self.client.post('/DTN/',json=data)
+        result = response.get_json()
+        assert result == {'id' : 1}
+
+        data = {
+            'name' : 'testDTN2',
+            'man_addr' : '172.17.0.1:8000',
+            'data_addr' : 'localhost',
+            'username' : 'nobody'
+        }
+
+        response = self.client.post('/DTN/',json=data)
+        result = response.get_json()
+        assert result == {'id' : 2}
+
+        data = {            
+            'srcfile' : ['hello_world', 'hello_world3'],
+            'dstfile' : ['hello_world2', 'hello-world4'],
+        }
+
+        response = self.client.post('/transfer/nuttcp/1/2',json=data)
         result = response.get_json()
         assert result == {'result' : True}
 
