@@ -34,6 +34,8 @@ build_image:
     before_script:
         - docker stop daas_orchestrator || true
     script:
-        - docker run -d --rm --name=daas_orchestrator -p 7000:5000 icair/dtnaas:orchestrator
+        - cid=$(docker run -d --rm --name=daas_orchestrator -p 7000:5000 icair/dtnaas:orchestrator)
+        - sleep 1
+        - docker inspect -f '{{.State.Running}}' $cid
 
 include: 'CI/.gitlab-ci-servers.yml'
