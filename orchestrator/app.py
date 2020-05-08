@@ -89,22 +89,23 @@ def run_transfer(sender, receiver, srcfile, dstfile, tool, params):
         
         response = requests.post('http://{}/receiver/{}'.format(receiver.man_addr, tool), json=result)
         result = response.json()
+        result['dstfile'] = dstfile
         if response.status_code != 200 or result.pop('result') != True:
             abort(make_response(jsonify(message="Unable start receiver"), 400))
     except requests.exceptions.ConnectionError:
         abort(make_response(jsonify(message="Unable to connect to DTN"), 503))
     return result
 
-def wait_for_transfer(sender, receiver, tool, result):
+def wait_for_transfer(sender, receiver, tool, transfer_param):
 
-    result['node'] = 'receiver'
-    response = requests.get('http://{}/{}/poll'.format(receiver.man_addr, tool), json=result)
-    if not (response.status_code == 200 and response.json()['return code'] == 0):
+    transfer_param['node'] = 'receiver'    
+    response = requests.get('http://{}/{}/poll'.format(receiver.man_addr, tool), json=transfer_param)
+    if not (response.status_code == 200 and response.json()[0] == 0):
         abort(make_response(jsonify(message="Transfer has failed"), 400))
 
-    result['node'] = 'sender'
-    response = requests.get('http://{}/{}/poll'.format(sender.man_addr, tool), json=result)
-    if not (response.status_code == 200 and response.json()['return code'] == 0):
+    transfer_param['node'] = 'sender'    
+    response = requests.get('http://{}/{}/poll'.format(sender.man_addr, tool), json=transfer_param)
+    if not (response.status_code == 200 and response.json() == 0):
         abort(make_response(jsonify(message="Transfer has failed"), 400))
 
 if __name__ == '__main__':
