@@ -8,10 +8,16 @@ import sqlalchemy
 import traceback
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///dtn.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db/dtn.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
+
+with app.app_context():
+    if db.engine.url.drivername == 'sqlite':
+        migrate.init_app(app, db, render_as_batch=True)
+    else:
+        migrate.init_app(app, db)
 
 class DTN(db.Model):
     id = db.Column(db.Integer, primary_key=True)
