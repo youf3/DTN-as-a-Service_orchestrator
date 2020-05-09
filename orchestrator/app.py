@@ -1,4 +1,5 @@
 import requests
+import datetime
 from flask import Flask, request, jsonify, abort, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
@@ -22,6 +23,18 @@ class DTN(db.Model):
     def __repr__(self):
         return '<DTN %r>' % self.id
 
+class Transfer(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('DTN.id'), nullable=True)
+    receiver_id = db.Column(db.Integer, db.ForeignKey('DTN.id'), nullable=True)
+    start_time = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
+    end_time = db.Column(db.DateTime, nullable=True)
+    file_size = db.Column(db.Integer, nullable=True, default = 0)
+    num_workers = db.Column(db.Integer, nullable=True, default = 0)
+
+    def __repr__(self):
+        return '<DTN %r>' % self.id
+
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
     target_DTN = DTN.query.get(id)
@@ -34,7 +47,7 @@ def add_DTN():
     db.session.add(new_DTN)
     try:
         db.session.commit()
-    except sqlalchemy.exc.IntegrityError as e:
+    except sqlalchemy.exc.IntegrityError:
         #traceback.print_exc()
         abort(make_response(jsonify(message="Unable to add DTN"), 400))
         
@@ -50,13 +63,29 @@ def delete_DTN(id):
 def check_running():
     return "The orchestrator is running"
 
+@app.route('/transfer/<int:transfer_id>', methods=['GET'])
+def get_transfer(transfer_id):
+    transfer = Transfer.query.get_or_404(transfer_id)
+    data = {
+        'id' : transfer.id,
+        'sender' : transfer.sender_id,
+        'receiver' : transfer.receiver_id,
+        'start_time' : transfer.start_time.timestamp(),
+        'end_time' : transfer.end_time.timestamp(),
+        'transfer_size' : transfer.file_size,
+        'num_workers' : transfer.num_workers
+    }
+    return jsonify(data)
+
 @app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
 def transfer(tool,sender_id, receiver_id):
     data = request.get_json()    
     srcfile = data.pop('srcfile')
     dstfile = data.pop('dstfile')    
-    sender = DTN.query.get(sender_id)    
-    receiver = DTN.query.get(receiver_id)
+    sender = DTN.query.get_or_404(sender_id)    
+    receiver = DTN.query.get_or_404(receiver_id)
+    start_time = datetime.datetime.utcnow()
+    file_size = 0 
     resultset = []    
 
     if type(srcfile) != list:
@@ -68,11 +97,22 @@ def transfer(tool,sender_id, receiver_id):
     
     for i in range(len(srcfile)):
         result = run_transfer(sender, receiver, srcfile[i], dstfile[i], tool, data)
+        file_size += result['size']
         resultset.append(result)
     
     for result in resultset:
         wait_for_transfer(sender, receiver, tool, result)
-    return jsonify({'result' : True})
+
+    end_time = datetime.datetime.utcnow()
+    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, num_workers = len(srcfile), file_size = file_size, start_time = start_time, end_time = end_time)
+    db.session.add(new_transfer)
+    try:
+        db.session.commit()
+    except sqlalchemy.exc.IntegrityError:
+        traceback.print_exc()
+        abort(make_response(jsonify(message="Unable to log transfer"), 400))   
+    
+    return jsonify({'result' : True, 'transfer' : new_transfer.id})
 
 def run_transfer(sender, receiver, srcfile, dstfile, tool, params):        
     try:
@@ -82,7 +122,8 @@ def run_transfer(sender, receiver, srcfile, dstfile, tool, params):
         result = response.json()
         if response.status_code != 200 or result.pop('result') != True:
             abort(make_response(jsonify(message="Unable start sender"), 400))
-        
+        file_size = result['size']
+
         ## receiver
         result['address'] = sender.data_addr
         result['file'] = dstfile
@@ -90,6 +131,7 @@ def run_transfer(sender, receiver, srcfile, dstfile, tool, params):
         response = requests.post('http://{}/receiver/{}'.format(receiver.man_addr, tool), json=result)
         result = response.json()
         result['dstfile'] = dstfile
+        result['size'] = file_size
         if response.status_code != 200 or result.pop('result') != True:
             abort(make_response(jsonify(message="Unable start receiver"), 400))
     except requests.exceptions.ConnectionError:
