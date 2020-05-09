@@ -43,7 +43,7 @@ class Transfer(db.Model):
 
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
-    target_DTN = DTN.query.get(id)
+    target_DTN = DTN.query.get_or_404(id)
     return {'id': target_DTN.id, 'name' : target_DTN.name, 'man_addr': target_DTN.man_addr, 'data_addr' : target_DTN.data_addr, 'username' : target_DTN.username}
 
 @app.route('/DTN/',  methods=['POST'])
@@ -63,6 +63,11 @@ def add_DTN():
 def delete_DTN(id):
     target_DTN = DTN.query.get(id)
     db.session.delete(target_DTN)
+    try:
+        db.session.commit()
+    except sqlalchemy.exc.IntegrityError:
+        #traceback.print_exc()
+        abort(make_response(jsonify(message="Unable to add DTN"), 400))
     return {'id' : target_DTN.id}
 
 @app.route('/')
