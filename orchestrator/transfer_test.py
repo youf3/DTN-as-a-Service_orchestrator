@@ -52,7 +52,15 @@ class TransferTest(TestCase):
 
         response = self.client.post('/transfer/nuttcp/1/2',json=data)
         result = response.get_json()
-        assert result == {'result' : True}
+        assert result == {'result' : True, 'transfer' : 1}
+
+        response = self.client.get('/transfer/1')
+        result = response.get_json()
+        assert result['id'] == 1
+        assert result['sender'] == 1
+        assert result['receiver'] == 2
+        assert result['transfer_size'] == 13
+        assert result['num_workers'] == 1
 
     def test_multiple_nuttcp_transfer(self):
         data = {
@@ -84,7 +92,15 @@ class TransferTest(TestCase):
 
         response = self.client.post('/transfer/nuttcp/1/2',json=data)
         result = response.get_json()
-        assert result == {'result' : True}
+        assert result == {'result' : True, 'transfer' : 1}
+
+        response = self.client.get('/transfer/1')
+        result = response.get_json()
+        assert result['id'] == 1
+        assert result['sender'] == 1
+        assert result['receiver'] == 2
+        assert result['transfer_size'] == 26
+        assert result['num_workers'] == 2
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
