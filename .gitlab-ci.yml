@@ -33,8 +33,9 @@ build_image:
         - master
     before_script:
         - docker stop daas_orchestrator || true
+        - docker volume create orchestrator
     script:
-        - cid=$(docker run -d --rm --name=daas_orchestrator -p 7000:5000 icair/dtnaas:orchestrator)
+        - cid=$(docker run -d --rm --name=daas_orchestrator -p 7000:5000 -v orchestrator:/orchestrator/db icair/dtnaas:orchestrator)
         - sleep 1
         - docker inspect -f '{{.State.Running}}' $cid
 
