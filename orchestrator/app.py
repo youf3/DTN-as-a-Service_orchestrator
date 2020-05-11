@@ -4,8 +4,10 @@ from flask import Flask, request, jsonify, abort, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 import sqlalchemy
-
+import logging
 import traceback
+
+logging.getLogger().setLevel(logging.DEBUG)
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db/dtn.db'
@@ -127,15 +129,19 @@ def transfer(tool,sender_id, receiver_id):
 
 def run_transfer(sender, receiver, srcfile, dstfile, tool, params):        
     try:
+        logging.debug('Running sender')
         ## sender
         params['file'] = srcfile
         response = requests.post('http://{}/sender/{}'.format(sender.man_addr, tool), json=params)
-        result = response.json()
+        result = response.json()        
+        if response.status_code == 404 and 'message' in result:
+            abort(make_response(jsonify(message=result['message']), 404))
         if response.status_code != 200 or result.pop('result') != True:
             abort(make_response(jsonify(message="Unable start sender"), 400))
         file_size = result['size']
 
         ## receiver
+        logging.debug('Running Receiver')
         result['address'] = sender.data_addr
         result['file'] = dstfile
         
