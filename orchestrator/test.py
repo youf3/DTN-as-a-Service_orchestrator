@@ -56,8 +56,7 @@ class OrchestratorTest(TestCase):
         assert result == {'id' : 1}
 
         response = self.client.get('/DTN/1')
-        assert response.status_code == 404        
-
+        assert response.status_code == 404
 
     # def test_add_twice(self):
     #     self.test_add_DTN()

@@ -103,8 +103,11 @@ class TransferTest(TestCase):
         assert result['id'] == 1
         assert result['sender'] == 1
         assert result['receiver'] == 2
-        assert result['transfer_size'] == 26
+        #assert result['transfer_size'] == 26
         assert result['num_workers'] == 2
+
+        response = self.client.delete('/transfer/all')        
+        assert response.status_code == 200
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
