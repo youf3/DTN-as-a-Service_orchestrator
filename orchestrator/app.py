@@ -6,6 +6,8 @@ from flask_migrate import Migrate
 import sqlalchemy
 import logging
 import traceback
+import itertools
+import concurrent.futures
 
 logging.getLogger().setLevel(logging.DEBUG)
 
@@ -20,6 +22,12 @@ with app.app_context():
         migrate.init_app(app, db, render_as_batch=True)
     else:
         migrate.init_app(app, db)
+
+def grouper(iterable, n, fillvalue=None):
+    "Collect data into fixed-length chunks or blocks"
+    # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
+    args = [iter(iterable)] * n
+    return itertools.zip_longest(*args, fillvalue=fillvalue)
 
 class DTN(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -90,34 +98,53 @@ def get_transfer(transfer_id):
     }
     return jsonify(data)
 
+def transfer_job(sender, receiver, srcfile, dstfile, tool, data):
+    result = run_transfer(sender, receiver, srcfile, dstfile, tool, data)    
+    wait_for_transfer(sender, receiver, tool, result)
+    return result
+
 @app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
 def transfer(tool,sender_id, receiver_id):
     data = request.get_json()    
-    srcfile = data.pop('srcfile')
-    dstfile = data.pop('dstfile')    
+    srcfiles = data.pop('srcfile')
+    dstfiles = data.pop('dstfile')    
     sender = DTN.query.get_or_404(sender_id)    
     receiver = DTN.query.get_or_404(receiver_id)
     start_time = datetime.datetime.utcnow()
     file_size = 0 
     resultset = []    
 
-    if type(srcfile) != list:
+    if type(srcfiles) != list:
         abort(make_response(jsonify(message="Malformed source file list"), 400))
-    if type(dstfile) != list:
+    if type(dstfiles) != list:
         abort(make_response(jsonify(message="Malformed destionation file list"), 400))
-    if len(srcfile) != len(dstfile):
+    if len(srcfiles) != len(dstfiles):
         abort(make_response(jsonify(message="Source and destination file sizes are not matching"), 400))
     
-    for i in range(len(srcfile)):
-        result = run_transfer(sender, receiver, srcfile[i], dstfile[i], tool, data)
-        file_size += result['size']
-        resultset.append(result)
-    
-    for result in resultset:
-        wait_for_transfer(sender, receiver, tool, result)
+    if 'num_threads' in data:
+        if type(data['num_threads']) != int or data['num_threads'] <= 0:
+            abort(make_response(jsonify(message="num_threads should be int larger than 0"), 400))                           
+        else:  
+            num_workers = data['num_threads']                   
+    else:
+        num_workers = len(srcfiles)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_to_transfer = {
+            executor.submit(transfer_job, sender, receiver, srcfile, dstfile, tool, data): 
+            (srcfile,dstfile) for srcfile,dstfile in zip(srcfiles, dstfiles)
+            }
+        for future in concurrent.futures.as_completed(future_to_transfer):
+            srcfile,dstfile = future_to_transfer[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                print('%r generated an exception: %s' % (srcfile, exc))
+            else:
+                file_size += result['size']                    
 
     end_time = datetime.datetime.utcnow()
-    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, num_workers = len(srcfile), file_size = file_size, start_time = start_time, end_time = end_time)
+    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, num_workers = num_workers, file_size = file_size, start_time = start_time, end_time = end_time)
     db.session.add(new_transfer)
     try:
         db.session.commit()
