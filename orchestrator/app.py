@@ -98,6 +98,17 @@ def get_transfer(transfer_id):
     }
     return jsonify(data)
 
+@app.route('/transfer/<int:transfer_id>',  methods=['DELETE'])
+def delete_transfer(transfer_id):
+    transfer = Transfer.query.get_or_404(transfer_id)
+    db.session.delete(transfer)
+    try:
+        db.session.commit()
+    except sqlalchemy.exc.IntegrityError:
+        #traceback.print_exc()
+        abort(make_response(jsonify(message="Unable to delete transfer"), 400))
+    return {'id' : transfer.id}
+
 def transfer_job(sender, receiver, srcfile, dstfile, tool, data):
     result = run_transfer(sender, receiver, srcfile, dstfile, tool, data)    
     wait_for_transfer(sender, receiver, tool, result)
