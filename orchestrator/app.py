@@ -49,7 +49,7 @@ class Transfer(db.Model):
     num_workers = db.Column(db.Integer, nullable=True, default = 0)
 
     def __repr__(self):
-        return '<DTN %r>' % self.id
+        return '<Transfer %r>' % self.id
 
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
@@ -108,6 +108,19 @@ def delete_transfer(transfer_id):
         #traceback.print_exc()
         abort(make_response(jsonify(message="Unable to delete transfer"), 400))
     return {'id' : transfer.id}
+
+@app.route('/transfer/all',  methods=['DELETE'])
+def delete_all_transfers():
+    transfers = Transfer.query.all()
+    for transfer in transfers:
+        db.session.delete(transfer)
+    db.session.delete(transfer)
+    try:
+        db.session.commit()
+    except sqlalchemy.exc.IntegrityError:
+        #traceback.print_exc()
+        abort(make_response(jsonify(message="Unable to delete all transfers"), 400))
+    return ''
 
 def transfer_job(sender, receiver, srcfile, dstfile, tool, data):
     result = run_transfer(sender, receiver, srcfile, dstfile, tool, data)    
