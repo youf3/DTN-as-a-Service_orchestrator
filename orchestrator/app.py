@@ -22,6 +22,8 @@ with app.app_context():
         migrate.init_app(app, db, render_as_batch=True)
     else:
         migrate.init_app(app, db)
+    from flask_migrate import upgrade as _upgrade
+    _upgrade(directory='orchestrator/migrations')
 
 def grouper(iterable, n, fillvalue=None):
     "Collect data into fixed-length chunks or blocks"
@@ -46,6 +48,7 @@ class Transfer(db.Model):
     start_time = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
     end_time = db.Column(db.DateTime, nullable=True)
     file_size = db.Column(db.Integer, nullable=True, default = 0)
+    num_files = db.Column(db.Integer, nullable=True)
     num_workers = db.Column(db.Integer, nullable=True, default = 0)
 
     def __repr__(self):
@@ -168,7 +171,7 @@ def transfer(tool,sender_id, receiver_id):
                 file_size += result['size']                    
 
     end_time = datetime.datetime.utcnow()
-    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, num_workers = num_workers, file_size = file_size, start_time = start_time, end_time = end_time)
+    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, num_workers = num_workers, num_files = len(srcfiles), file_size = file_size, start_time = start_time, end_time = end_time)
     db.session.add(new_transfer)
     try:
         db.session.commit()
