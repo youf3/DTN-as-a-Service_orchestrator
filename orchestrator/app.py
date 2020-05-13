@@ -50,6 +50,7 @@ class Transfer(db.Model):
     file_size = db.Column(db.Integer, nullable=True, default = 0)
     num_files = db.Column(db.Integer, nullable=True)
     num_workers = db.Column(db.Integer, nullable=True, default = 0)
+    latency = db.Column(db.Float, nullable=True, default = 0)
 
     def __repr__(self):
         return '<Transfer %r>' % self.id
@@ -97,7 +98,8 @@ def get_transfer(transfer_id):
         'start_time' : transfer.start_time.timestamp(),
         'end_time' : transfer.end_time.timestamp(),
         'transfer_size' : transfer.file_size,
-        'num_workers' : transfer.num_workers
+        'num_workers' : transfer.num_workers,
+        'latency' : transfer.latency
     }
     return jsonify(data)
 
@@ -156,6 +158,9 @@ def transfer(tool,sender_id, receiver_id):
     else:
         num_workers = len(srcfiles)
 
+    response = requests.get('http://{}/ping/{}'.format(sender.man_addr, receiver.data_addr))
+    latency = response.json()['latency']
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         future_to_transfer = {
             executor.submit(transfer_job, sender, receiver, srcfile, dstfile, tool, data): 
@@ -171,7 +176,8 @@ def transfer(tool,sender_id, receiver_id):
                 file_size += result['size']                    
 
     end_time = datetime.datetime.utcnow()
-    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, num_workers = num_workers, num_files = len(srcfiles), file_size = file_size, start_time = start_time, end_time = end_time)
+    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, num_workers = num_workers, 
+    num_files = len(srcfiles), file_size = file_size, start_time = start_time, end_time = end_time, latency = latency)
     db.session.add(new_transfer)
     try:
         db.session.commit()
