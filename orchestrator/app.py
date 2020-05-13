@@ -99,6 +99,7 @@ def get_transfer(transfer_id):
         'end_time' : transfer.end_time.timestamp(),
         'transfer_size' : transfer.file_size,
         'num_workers' : transfer.num_workers,
+        'num_files' : transfer.num_files,
         'latency' : transfer.latency
     }
     return jsonify(data)
