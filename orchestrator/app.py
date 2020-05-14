@@ -152,11 +152,11 @@ def transfer(tool,sender_id, receiver_id):
     if len(srcfiles) != len(dstfiles):
         abort(make_response(jsonify(message="Source and destination file sizes are not matching"), 400))
     
-    if 'num_threads' in data:
-        if type(data['num_threads']) != int or data['num_threads'] <= 0:
-            abort(make_response(jsonify(message="num_threads should be int larger than 0"), 400))                           
+    if 'num_workers' in data:
+        if type(data['num_workers']) != int or data['num_workers'] <= 0:
+            abort(make_response(jsonify(message="num_workers should be int larger than 0"), 400))                           
         else:  
-            num_workers = data['num_threads']                   
+            num_workers = data['num_workers']                   
     else:
         num_workers = len(srcfiles)
 
