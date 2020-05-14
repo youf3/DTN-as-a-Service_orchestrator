@@ -62,6 +62,14 @@ class TransferTest(TestCase):
         assert result['transfer_size'] == 13
         assert result['num_workers'] == 1
 
+        response = self.client.get('/transfer/nuttcp')
+        result = response.get_json()
+        assert result['1']        
+        assert result['1']['sender'] == 1
+        assert result['1']['receiver'] == 2
+        assert result['1']['transfer_size'] == 13
+        assert result['1']['num_workers'] == 1
+
         response = self.client.delete('/transfer/1')
         result = response.get_json()
         assert result['id'] == 1

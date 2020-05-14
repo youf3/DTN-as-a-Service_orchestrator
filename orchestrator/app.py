@@ -103,6 +103,23 @@ def get_transfer(transfer_id):
         'num_files' : transfer.num_files,
         'latency' : transfer.latency
     }
+    return jsonify(data)    
+
+@app.route('/transfer/<string:tool>', methods=['GET'])
+def get_transfer_for_tool(tool):
+    transfers = Transfer.query.filter_by(tool=tool).all()
+    data = {}
+    for transfer in transfers:
+        data[transfer.id] = {
+        'sender' : transfer.sender_id,
+        'receiver' : transfer.receiver_id,
+        'start_time' : transfer.start_time.timestamp(),
+        'end_time' : transfer.end_time.timestamp(),
+        'transfer_size' : transfer.file_size,
+        'num_workers' : transfer.num_workers,
+        'num_files' : transfer.num_files,
+        'latency' : transfer.latency
+        }
     return jsonify(data)
 
 @app.route('/transfer/<int:transfer_id>',  methods=['DELETE'])
