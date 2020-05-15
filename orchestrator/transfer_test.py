@@ -50,6 +50,10 @@ class TransferTest(TestCase):
             'dstfile' : ['hello_world2'],
         }
 
+        response = self.client.get('/ping/1/2')
+        result = response.get_json()['latency']
+        assert result is not None
+
         response = self.client.post('/transfer/nuttcp/1/2',json=data)
         result = response.get_json()
         assert result == {'result' : True, 'transfer' : 1}
