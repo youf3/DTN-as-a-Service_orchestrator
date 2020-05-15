@@ -151,6 +151,13 @@ def transfer_job(sender, receiver, srcfile, dstfile, tool, data):
     wait_for_transfer(sender, receiver, tool, result)
     return result
 
+@app.route('/ping/<int:sender_id>/<int:receiver_id>', methods=['get'])
+def get_latency(sender_id, receiver_id):
+    sender = DTN.query.get_or_404(sender_id)    
+    receiver = DTN.query.get_or_404(receiver_id)
+    response = requests.get('http://{}/ping/{}'.format(sender.man_addr, receiver.data_addr))    
+    return response.json()
+
 @app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
 def transfer(tool,sender_id, receiver_id):
     data = request.get_json()    
@@ -177,8 +184,7 @@ def transfer(tool,sender_id, receiver_id):
     else:
         num_workers = len(srcfiles)
 
-    response = requests.get('http://{}/ping/{}'.format(sender.man_addr, receiver.data_addr))
-    latency = response.json()['latency']
+    latency = get_latency(sender.id, receiver.id)['latency']
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         future_to_transfer = {
