@@ -17,6 +17,7 @@ class OrchestratorTest(TestCase):
             os.remove('orchestrator/test.db')
         from app import db
         db.create_all()
+        app.init_db()
 
     def tearDown(self):
         os.remove('orchestrator/test.db')
@@ -57,6 +58,15 @@ class OrchestratorTest(TestCase):
 
         response = self.client.get('/DTN/1')
         assert response.status_code == 404
+
+    def test_get_worker_types(self):
+        response = self.client.get('/worker_type')
+        result = response.get_json()
+        assert result == {
+            '1': 'OS_CONTROLLED',
+            '2': 'BIND_TO_NUMA',
+            '3': 'BIND_TO_CORE'
+        }
 
     # def test_add_twice(self):
     #     self.test_add_DTN()

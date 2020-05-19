@@ -1,6 +1,6 @@
 import requests
 import datetime
-from flask import Flask, request, jsonify, abort, make_response
+from flask import Flask, request, jsonify, abort, make_response, json
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 import sqlalchemy
@@ -51,10 +51,19 @@ class Transfer(db.Model):
     num_files = db.Column(db.Integer, nullable=True)
     tool = db.Column(db.String(80), unique=False, nullable=True)
     num_workers = db.Column(db.Integer, nullable=True, default = 0)
-    latency = db.Column(db.Float, nullable=True, default = 0)    
+    latency = db.Column(db.Float, nullable=True, default = 0)
+    worker_type_id = db.Column(db.Integer, db.ForeignKey('WorkerType.id'), nullable=True)
 
     def __repr__(self):
         return '<Transfer %r>' % self.id
+
+class WorkerType(db.Model):
+    __tablename__ = 'WorkerType'
+    id = db.Column(db.Integer, primary_key=True)
+    description = db.Column(db.String(80), unique=False, nullable=True)
+
+    def __repr__(self):
+        return '<WorkerType %r>' % self.description
 
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
@@ -101,7 +110,8 @@ def get_transfer(transfer_id):
         'transfer_size' : transfer.file_size,
         'num_workers' : transfer.num_workers,
         'num_files' : transfer.num_files,
-        'latency' : transfer.latency
+        'latency' : transfer.latency,
+        'worker_type_id' : transfer.worker_type_id
     }
     return jsonify(data)    
 
@@ -118,7 +128,8 @@ def get_transfer_for_tool(tool):
         'transfer_size' : transfer.file_size,
         'num_workers' : transfer.num_workers,
         'num_files' : transfer.num_files,
-        'latency' : transfer.latency
+        'latency' : transfer.latency,
+        'worker_type_id' : transfer.worker_type_id
         }
     return jsonify(data)
 
@@ -146,6 +157,14 @@ def delete_all_transfers():
         abort(make_response(jsonify(message="Unable to delete all transfers"), 400))
     return ''
 
+@app.route('/worker_type',  methods=['GET'])
+def get_worker_types():
+    worker_types = WorkerType.query.all()
+    data = {}    
+    for i in worker_types:
+        data[i.id] = i.description
+    return jsonify(data)
+
 def transfer_job(sender, receiver, srcfile, dstfile, tool, data):
     result = run_transfer(sender, receiver, srcfile, dstfile, tool, data)    
     wait_for_transfer(sender, receiver, tool, result)
@@ -165,9 +184,13 @@ def transfer(tool,sender_id, receiver_id):
     dstfiles = data.pop('dstfile')    
     sender = DTN.query.get_or_404(sender_id)    
     receiver = DTN.query.get_or_404(receiver_id)
-    start_time = datetime.datetime.utcnow()
+    if 'numa_scheme' in data:
+        worker_type = data['numa_scheme']
+    else:
+        worker_type = 1
+
     file_size = 0 
-    resultset = []    
+    resultset = []
 
     if type(srcfiles) != list:
         abort(make_response(jsonify(message="Malformed source file list"), 400))
@@ -185,6 +208,7 @@ def transfer(tool,sender_id, receiver_id):
         num_workers = len(srcfiles)
 
     latency = get_latency(sender.id, receiver.id)['latency']
+    start_time = datetime.datetime.utcnow()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         future_to_transfer = {
@@ -202,7 +226,7 @@ def transfer(tool,sender_id, receiver_id):
 
     end_time = datetime.datetime.utcnow()
     new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, start_time = start_time, end_time = end_time, 
-    file_size = file_size, num_files = len(srcfiles), tool=tool ,num_workers = num_workers, latency = latency)
+    file_size = file_size, num_files = len(srcfiles), tool=tool ,num_workers = num_workers, latency = latency, worker_type_id = worker_type)
     db.session.add(new_transfer)
     try:
         db.session.commit()
@@ -252,6 +276,24 @@ def wait_for_transfer(sender, receiver, tool, transfer_param):
     if not (response.status_code == 200 and response.json() == 0):
         abort(make_response(jsonify(message="Transfer has failed"), 400))
 
+def init_db():
+    from libs.Schemes import NumaScheme    
+    worker_types = {i.name:i.value for i in NumaScheme}
+    wtypes = WorkerType.query.all()
+
+    for k,v in worker_types.items():
+        if k not in [i.description for i in wtypes]:
+            wtype = WorkerType(id=v, description=k)
+            db.session.add(wtype)
+
+    try:
+        db.session.commit()
+    except sqlalchemy.exc.IntegrityError:
+        #traceback.print_exc()
+        abort(make_response(jsonify(message="Unable to add DTN"), 400))        
+   
+
 if __name__ == '__main__':
+    init_db()
     app.run('0.0.0.0')
     pass
