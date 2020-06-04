@@ -1,6 +1,7 @@
 import requests
 import datetime
-from flask import Flask, request, jsonify, abort, make_response, json
+import os 
+from flask import Flask, request, jsonify, abort, make_response, json#, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 import sqlalchemy
@@ -8,14 +9,17 @@ import logging
 import traceback
 import itertools
 import concurrent.futures
+import libs.ThreadExecutor
 
 logging.getLogger().setLevel(logging.DEBUG)
 
 app = Flask(__name__)
+app.secret_key = os.urandom(16)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db/dtn.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
+thread_executor_pools = {}
 
 with app.app_context():
     if db.engine.url.drivername == 'sqlite':
@@ -24,12 +28,6 @@ with app.app_context():
         migrate.init_app(app, db)
     from flask_migrate import upgrade as _upgrade
     _upgrade(directory='orchestrator/migrations')
-
-def grouper(iterable, n, fillvalue=None):
-    "Collect data into fixed-length chunks or blocks"
-    # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
-    args = [iter(iterable)] * n
-    return itertools.zip_longest(*args, fillvalue=fillvalue)
 
 class DTN(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -64,6 +62,70 @@ class WorkerType(db.Model):
 
     def __repr__(self):
         return '<WorkerType %r>' % self.description
+
+def init_db():
+    from libs.Schemes import NumaScheme    
+    worker_types = {i.name:i.value for i in NumaScheme}
+    wtypes = WorkerType.query.all()
+
+    for k,v in worker_types.items():
+        if k not in [i.description for i in wtypes]:
+            wtype = WorkerType(id=v, description=k)
+            db.session.add(wtype)
+
+    try:
+        db.session.commit()
+    except sqlalchemy.exc.IntegrityError:
+        #traceback.print_exc()
+        abort(make_response(jsonify(message="Unable to add DTN"), 400))        
+
+def transfer_job(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data):
+    result = run_transfer(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data)    
+    end_time = wait_for_transfer(sender, receiver, tool, result)
+    return result, end_time
+    #return None, None
+
+def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool, params):        
+    try:
+        logging.debug('Running sender')
+        ## sender
+        params['file'] = srcfile
+        response = requests.post('http://{}/sender/{}'.format(sender_ip, tool), json=params)
+        result = response.json()        
+        if response.status_code == 404 and 'message' in result:
+            abort(make_response(jsonify(message=result['message']), 404))
+        if response.status_code != 200 or result.pop('result') != True:
+            abort(make_response(jsonify(message="Unable start sender"), 400))
+        file_size = result['size']
+
+        ## receiver
+        logging.debug('Running Receiver')
+        result['address'] = sender_data_ip
+        result['file'] = dstfile
+        
+        response = requests.post('http://{}/receiver/{}'.format(receiver_ip, tool), json=result)
+        result = response.json()
+        result['dstfile'] = dstfile
+        result['size'] = file_size
+        
+        if response.status_code != 200 or result.pop('result') != True:
+            abort(make_response(jsonify(message="Unable start receiver"), 400))
+    except requests.exceptions.ConnectionError:
+        abort(make_response(jsonify(message="Unable to connect to DTN"), 503))
+    return result
+
+def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param):
+
+    transfer_param['node'] = 'receiver'    
+    response = requests.get('http://{}/{}/poll'.format(receiver_ip, tool), json=transfer_param)
+    if not (response.status_code == 200 and response.json()[0] == 0):
+        abort(make_response(jsonify(message="Transfer has failed"), 400))
+
+    transfer_param['node'] = 'sender'    
+    response = requests.get('http://{}/{}/poll'.format(sender_ip, tool), json=transfer_param)
+    if not (response.status_code == 200 and response.json() == 0):
+        abort(make_response(jsonify(message="Transfer has failed"), 400))
+    return datetime.datetime.utcnow()
 
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
@@ -165,11 +227,6 @@ def get_worker_types():
         data[i.id] = i.description
     return jsonify(data)
 
-def transfer_job(sender, receiver, srcfile, dstfile, tool, data):
-    result = run_transfer(sender, receiver, srcfile, dstfile, tool, data)    
-    wait_for_transfer(sender, receiver, tool, result)
-    return result
-
 @app.route('/ping/<int:sender_id>/<int:receiver_id>', methods=['get'])
 def get_latency(sender_id, receiver_id):
     sender = DTN.query.get_or_404(sender_id)    
@@ -179,17 +236,17 @@ def get_latency(sender_id, receiver_id):
 
 @app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
 def transfer(tool,sender_id, receiver_id):
-    data = request.get_json()    
+    global thread_executor_pools
+    data = request.get_json()
     srcfiles = data.pop('srcfile')
-    dstfiles = data.pop('dstfile')    
-    sender = DTN.query.get_or_404(sender_id)    
+    dstfiles = data.pop('dstfile')
+    sender = DTN.query.get_or_404(sender_id)
     receiver = DTN.query.get_or_404(receiver_id)
     if 'numa_scheme' in data:
         worker_type = data['numa_scheme']
     else:
         worker_type = 1
 
-    file_size = 0 
     resultset = []
 
     if type(srcfiles) != list:
@@ -206,92 +263,76 @@ def transfer(tool,sender_id, receiver_id):
             num_workers = data['num_workers']                   
     else:
         num_workers = len(srcfiles)
+        data['num_workers'] = num_workers
 
     latency = get_latency(sender.id, receiver.id)['latency']
     start_time = datetime.datetime.utcnow()
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        future_to_transfer = {
-            executor.submit(transfer_job, sender, receiver, srcfile, dstfile, tool, data): 
-            (srcfile,dstfile) for srcfile,dstfile in zip(srcfiles, dstfiles)
-            }
-        for future in concurrent.futures.as_completed(future_to_transfer):
-            srcfile,dstfile = future_to_transfer[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                print('%r generated an exception: %s' % (srcfile, exc))
-            else:
-                file_size += result['size']                    
-
-    end_time = datetime.datetime.utcnow()
-    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, start_time = start_time, end_time = end_time, 
-    file_size = file_size, num_files = len(srcfiles), tool=tool ,num_workers = num_workers, latency = latency, worker_type_id = worker_type)
+    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, start_time = datetime.datetime.utcnow(), end_time = None, 
+    file_size = None, num_files = len(srcfiles), tool=tool, num_workers = num_workers, latency = latency, worker_type_id = worker_type)    
     db.session.add(new_transfer)
     try:
         db.session.commit()
     except sqlalchemy.exc.IntegrityError:
         traceback.print_exc()
         abort(make_response(jsonify(message="Unable to log transfer"), 400))   
+
+    start_time = datetime.datetime.utcnow()
+    executor = libs.ThreadExecutor.ThreadPoolExecutor(max_workers=num_workers)
     
+    future_to_transfer = {
+        executor.submit(transfer_job, sender.man_addr, sender.data_addr, receiver.man_addr, srcfile, dstfile, tool, data): 
+        (srcfile,dstfile) for srcfile,dstfile in zip(srcfiles, dstfiles)
+        }
+    thread_executor_pools[new_transfer.id] = (executor, future_to_transfer)
     return jsonify({'result' : True, 'transfer' : new_transfer.id})
 
-def run_transfer(sender, receiver, srcfile, dstfile, tool, params):        
-    try:
-        logging.debug('Running sender')
-        ## sender
-        params['file'] = srcfile
-        response = requests.post('http://{}/sender/{}'.format(sender.man_addr, tool), json=params)
-        result = response.json()        
-        if response.status_code == 404 and 'message' in result:
-            abort(make_response(jsonify(message=result['message']), 404))
-        if response.status_code != 200 or result.pop('result') != True:
-            abort(make_response(jsonify(message="Unable start sender"), 400))
-        file_size = result['size']
+@app.route('/wait/<int:transfer_id>', methods=['POST'])
+def wait(transfer_id):
+    global thread_executor_pools
+    transfer = Transfer.query.get_or_404(transfer_id)
 
-        ## receiver
-        logging.debug('Running Receiver')
-        result['address'] = sender.data_addr
-        result['file'] = dstfile
+    file_size = 0
+    end_time = None
+
+    executor, future_to_transfer =  thread_executor_pools[transfer_id]
+    for future in concurrent.futures.as_completed(future_to_transfer):
+        srcfile,dstfile = future_to_transfer[future]
+        try:
+            result, t_end_time = future.result()            
+        except Exception as exc:
+            print('%r generated an exception: %s' % (srcfile, exc))
+        else:
+            file_size += result['size']
+            if end_time == None or end_time < t_end_time: 
+                end_time = t_end_time            
+
+    executor.shutdown()
         
-        response = requests.post('http://{}/receiver/{}'.format(receiver.man_addr, tool), json=result)
-        result = response.json()
-        result['dstfile'] = dstfile
-        result['size'] = file_size
-        if response.status_code != 200 or result.pop('result') != True:
-            abort(make_response(jsonify(message="Unable start receiver"), 400))
-    except requests.exceptions.ConnectionError:
-        abort(make_response(jsonify(message="Unable to connect to DTN"), 503))
-    return result
-
-def wait_for_transfer(sender, receiver, tool, transfer_param):
-
-    transfer_param['node'] = 'receiver'    
-    response = requests.get('http://{}/{}/poll'.format(receiver.man_addr, tool), json=transfer_param)
-    if not (response.status_code == 200 and response.json()[0] == 0):
-        abort(make_response(jsonify(message="Transfer has failed"), 400))
-
-    transfer_param['node'] = 'sender'    
-    response = requests.get('http://{}/{}/poll'.format(sender.man_addr, tool), json=transfer_param)
-    if not (response.status_code == 200 and response.json() == 0):
-        abort(make_response(jsonify(message="Transfer has failed"), 400))
-
-def init_db():
-    from libs.Schemes import NumaScheme    
-    worker_types = {i.name:i.value for i in NumaScheme}
-    wtypes = WorkerType.query.all()
-
-    for k,v in worker_types.items():
-        if k not in [i.description for i in wtypes]:
-            wtype = WorkerType(id=v, description=k)
-            db.session.add(wtype)
-
+    transfer.file_size = file_size
+    transfer.end_time = end_time
     try:
         db.session.commit()
     except sqlalchemy.exc.IntegrityError:
-        #traceback.print_exc()
-        abort(make_response(jsonify(message="Unable to add DTN"), 400))        
-   
+        traceback.print_exc()
+        abort(make_response(jsonify(message="Unable to update transfer"), 400))   
+    
+    return jsonify({'result' : True})
+
+@app.route('/transfer/<int:transfer_id>/scale/', methods=['POST'])
+def scale_transfer(transfer_id):    
+    global thread_executor_pools
+    data = request.get_json()
+    if 'num_workers' not in data:
+        abort(make_response(jsonify(message="num_workers are required"), 400))
+    
+    try: 
+        num_workers = int(data['num_workers'])
+    except Exception:
+        abort(make_response(jsonify(message="num_workers shoud be integer"), 400))
+    
+    executor, _ = thread_executor_pools[transfer_id]
+    executor.set_max_workers(num_workers)
+    return ''
 
 if __name__ == '__main__':
     init_db()
