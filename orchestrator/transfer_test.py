@@ -25,7 +25,7 @@ class TransferTest(TestCase):
     def test_nuttcp_transfer(self):
         data = {
             'name' : 'testDTN1',
-            'man_addr' : '172.17.0.1:8000',
+            'man_addr' : '172.17.0.1:7001',
             'data_addr' : 'localhost',
             'username' : 'nobody'
         }
@@ -36,7 +36,7 @@ class TransferTest(TestCase):
 
         data = {
             'name' : 'testDTN2',
-            'man_addr' : '172.17.0.1:8000',
+            'man_addr' : '172.17.0.1:7001',
             'data_addr' : 'localhost',
             'username' : 'nobody'
         }
@@ -81,7 +81,7 @@ class TransferTest(TestCase):
     def test_multiple_nuttcp_transfer(self):
         data = {
             'name' : 'testDTN1',
-            'man_addr' : '172.17.0.1:8000',
+            'man_addr' : '172.17.0.1:7001',
             'data_addr' : 'localhost',
             'username' : 'nobody'
         }
@@ -92,7 +92,7 @@ class TransferTest(TestCase):
 
         data = {
             'name' : 'testDTN2',
-            'man_addr' : '172.17.0.1:8000',
+            'man_addr' : '172.17.0.1:7001',
             'data_addr' : 'localhost',
             'username' : 'nobody'
         }
@@ -108,8 +108,11 @@ class TransferTest(TestCase):
 
         response = self.client.post('/transfer/nuttcp/1/2',json=data)
         result = response.get_json()
-        assert result == {'result' : True, 'transfer' : 1}
+        assert result == {'result' : True, 'transfer' : 1}        
 
+        response = self.client.post('/wait/1')
+        assert response.status_code == 200
+        
         response = self.client.get('/transfer/1')
         result = response.get_json()
         assert result['id'] == 1
