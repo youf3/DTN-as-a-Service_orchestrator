@@ -58,6 +58,9 @@ class TransferTest(TestCase):
         result = response.get_json()
         assert result == {'result' : True, 'transfer' : 1}
 
+        response = self.client.post('/wait/1')
+        assert response.status_code == 200
+
         response = self.client.get('/transfer/1')
         result = response.get_json()
         assert result['id'] == 1
