@@ -27,7 +27,8 @@ class TransferTest(TestCase):
             'name' : 'testDTN1',
             'man_addr' : '172.17.0.1:7001',
             'data_addr' : 'localhost',
-            'username' : 'nobody'
+            'username' : 'nobody',
+            'interface' : 'eth0'
         }
 
         response = self.client.post('/DTN/',json=data)
@@ -38,7 +39,8 @@ class TransferTest(TestCase):
             'name' : 'testDTN2',
             'man_addr' : '172.17.0.1:7001',
             'data_addr' : 'localhost',
-            'username' : 'nobody'
+            'username' : 'nobody',
+            'interface' : 'eth0'
         }
 
         response = self.client.post('/DTN/',json=data)
@@ -86,7 +88,8 @@ class TransferTest(TestCase):
             'name' : 'testDTN1',
             'man_addr' : '172.17.0.1:7001',
             'data_addr' : 'localhost',
-            'username' : 'nobody'
+            'username' : 'nobody',
+            'interface' : 'eth0'
         }
 
         response = self.client.post('/DTN/',json=data)
@@ -97,7 +100,8 @@ class TransferTest(TestCase):
             'name' : 'testDTN2',
             'man_addr' : '172.17.0.1:7001',
             'data_addr' : 'localhost',
-            'username' : 'nobody'
+            'username' : 'nobody',
+            'interface' : 'eth0'
         }
 
         response = self.client.post('/DTN/',json=data)

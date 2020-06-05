@@ -32,7 +32,8 @@ class OrchestratorTest(TestCase):
             'name' : 'testDTN1',
             'man_addr' : '192.168.1.1',
             'data_addr' : '192.168.2.1',
-            'username' : 'nobody'
+            'username' : 'nobody',
+            'interface' : 'eth0'
         }
         response = self.client.post('/DTN/',json=data)
         result = response.get_json()
@@ -47,7 +48,8 @@ class OrchestratorTest(TestCase):
             'man_addr' : '192.168.1.1',
             'data_addr' : '192.168.2.1',
             'id' : 1,
-            'username' : 'nobody'
+            'username' : 'nobody',
+            'interface' : 'eth0'
         }
 
     def test_delete_DTN(self):
