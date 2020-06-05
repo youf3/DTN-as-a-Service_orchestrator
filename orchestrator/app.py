@@ -35,6 +35,7 @@ class DTN(db.Model):
     man_addr = db.Column(db.String(80), unique=False, nullable=True)
     data_addr = db.Column(db.String(80), unique=False, nullable=True)
     username = db.Column(db.String(80), unique=False, nullable=True)
+    interface = db.Column(db.String(15), unique=False, nullable=True)
 
     def __repr__(self):
         return '<DTN %r>' % self.id
@@ -130,12 +131,12 @@ def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param):
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
     target_DTN = DTN.query.get_or_404(id)
-    return {'id': target_DTN.id, 'name' : target_DTN.name, 'man_addr': target_DTN.man_addr, 'data_addr' : target_DTN.data_addr, 'username' : target_DTN.username}
+    return {'id': target_DTN.id, 'name' : target_DTN.name, 'man_addr': target_DTN.man_addr, 'data_addr' : target_DTN.data_addr, 'username' : target_DTN.username, 'interface' : target_DTN.interface}
 
 @app.route('/DTN/',  methods=['POST'])
 def add_DTN():
     data = request.get_json()
-    new_DTN = DTN(name = data['name'], man_addr = data['man_addr'], data_addr = data['data_addr'], username = data['username'])
+    new_DTN = DTN(name = data['name'], man_addr = data['man_addr'], data_addr = data['data_addr'], username = data['username'], interface = data['interface'])
     db.session.add(new_DTN)
     try:
         db.session.commit()
