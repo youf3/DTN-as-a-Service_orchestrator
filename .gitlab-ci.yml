@@ -1,42 +1,10 @@
-image: python:3.6.10-slim
-
-stages:    
-    - test
-    - deploy
-
-test:
-    stage: test
-    script:         
-        - pip install -r orchestrator/requirements.txt
-        - python orchestrator/test.py
-
-build_image:
-    stage: test
-    tags: 
-        - build_docker
-    script:
-        - echo "$REGI_PASS" | docker login --username "$REGI_USER" --password-stdin
-        - docker build -t icair/dtnaas:orchestrator .
-        - docker pull icair/dtnaas:agent
-        - mkdir data; echo "hello_world!" > data/hello_world; echo "hello_world!" > data/hello_world3
-        - docker run --rm -d --name=daas_test_agent -p 7001:5000/tcp -v "$(pwd)"/data:/data icair/dtnaas:agent
-        - docker run -t icair/dtnaas:orchestrator orchestrator/test.py
-        - docker run -t icair/dtnaas:orchestrator orchestrator/transfer_test.py
-        - docker push icair/dtnaas:orchestrator
-    after_script:
-        - docker logs daas_test_agent
-        - docker stop daas_test_agent || true
-
-.deploy_image:
-    stage: deploy
-    only:
-        - master
-    before_script:
-        - docker stop daas_orchestrator || true
-        - docker volume create orchestrator
-    script:
-        - cid=$(docker run -d --rm --name=daas_orchestrator -p 7000:5000 -v orchestrator:/orchestrator/db icair/dtnaas:orchestrator)
-        - sleep 1
-        - docker inspect -f '{{.State.Running}}' $cid
-
-include: 'CI/.gitlab-ci-servers.yml'
+image: gcr.io/kaniko-project/executor:debug
+   
+stages:
+  - build-and-push
+   
+build-and-push-job:
+  stage: build-and-push
+  script:
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor --cache=true --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:${CI_COMMIT_SHA:0:8} --destination $CI_REGISTRY_IMAGE:latest
