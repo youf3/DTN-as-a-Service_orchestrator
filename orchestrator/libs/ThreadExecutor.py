@@ -112,8 +112,10 @@ class ThreadPoolExecutor(_base.Executor):
                                     ("ThreadPoolExecutor-%d" % self._counter()))
     
     def set_max_workers(self, worker_num):
+        prev_workers = self._max_workers
         self._max_workers = worker_num
-        self._adjust_thread_count()
+        for i in range(prev_workers, worker_num):
+            self._adjust_thread_count()
 
     def submit(self, fn, *args, **kwargs):
         with self._shutdown_lock:
