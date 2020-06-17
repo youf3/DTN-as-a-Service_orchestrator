@@ -27,7 +27,7 @@ with app.app_context():
     else:
         migrate.init_app(app, db)
     from flask_migrate import upgrade as _upgrade
-    _upgrade(directory='orchestrator/migrations')
+    #_upgrade(directory='orchestrator/migrations')
 
 class DTN(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -63,6 +63,8 @@ class WorkerType(db.Model):
 
     def __repr__(self):
         return '<WorkerType %r>' % self.description
+
+db.create_all()
 
 def init_db():
     from libs.Schemes import NumaScheme    
