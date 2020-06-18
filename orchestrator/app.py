@@ -21,6 +21,8 @@ db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 thread_executor_pools = {}
 
+gparams = {'blocksize' : 64}
+
 with app.app_context():
     if db.engine.url.drivername == 'sqlite':
         migrate.init_app(app, db, render_as_batch=True)
@@ -89,10 +91,13 @@ def transfer_job(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data)
     #return None, None
 
 def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool, params):        
-    try:
+    global gparams
+
+    try:        
         logging.debug('Running sender')
         ## sender
         params['file'] = srcfile
+        params['blocksize'] = gparams['blocksize']
         response = requests.post('http://{}/sender/{}'.format(sender_ip, tool), json=params)
         result = response.json()        
         if response.status_code == 404 and 'message' in result:
@@ -105,6 +110,7 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         logging.debug('Running Receiver')
         result['address'] = sender_data_ip
         result['file'] = dstfile
+        result['blocksize'] = gparams['blocksize']
         
         response = requests.post('http://{}/receiver/{}'.format(receiver_ip, tool), json=result)
         result = response.json()
@@ -240,6 +246,8 @@ def get_latency(sender_id, receiver_id):
 @app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
 def transfer(tool,sender_id, receiver_id):
     global thread_executor_pools
+    global gparams
+    
     data = request.get_json()
     srcfiles = data.pop('srcfile')
     dstfiles = data.pop('dstfile')
@@ -267,6 +275,13 @@ def transfer(tool,sender_id, receiver_id):
     else:
         num_workers = len(srcfiles)
         data['num_workers'] = num_workers
+
+    if 'blocksize' in data:
+        try: 
+            logging.debug('Setting blocksize to %s' % data['blocksize'])
+            gparams['blocksize'] = int(data['blocksize'])
+        except Exception:
+            abort(make_response(jsonify(message="blocksize should be integer"), 400))
 
     latency = get_latency(sender.id, receiver.id)['latency']
     start_time = datetime.datetime.utcnow()
@@ -324,17 +339,30 @@ def wait(transfer_id):
 @app.route('/transfer/<int:transfer_id>/scale/', methods=['POST'])
 def scale_transfer(transfer_id):    
     global thread_executor_pools
+    global gparams
     data = request.get_json()
-    if 'num_workers' not in data:
-        abort(make_response(jsonify(message="num_workers are required"), 400))
+    if 'num_workers' not in data and 'blocksize' not in data: 
+        abort(make_response(jsonify(message="num_workers or blocksize is required"), 400))
+        
+    if 'num_workers' in data:    
+        try: 
+            num_workers = int(data['num_workers'])
+        except Exception:
+            abort(make_response(jsonify(message="num_workers should be integer"), 400))
+        
+        logging.debug('Setting num_workers to %s' % num_workers)
+        executor, _ = thread_executor_pools[transfer_id]
+        executor.set_max_workers(num_workers)
     
-    try: 
-        num_workers = int(data['num_workers'])
-    except Exception:
-        abort(make_response(jsonify(message="num_workers shoud be integer"), 400))
-    
-    executor, _ = thread_executor_pools[transfer_id]
-    executor.set_max_workers(num_workers)
+    if 'blocksize' in data:
+        try: 
+            blocksize = int(data['blocksize'])
+        except Exception:
+            abort(make_response(jsonify(message="blocksize should be integer"), 400))
+
+        logging.debug('Setting blocksize to %s' % blocksize)
+        gparams['blocksize'] = blocksize
+
     return ''
 
 if __name__ == '__main__':
