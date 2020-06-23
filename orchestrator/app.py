@@ -94,7 +94,7 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
     global gparams
 
     try:        
-        logging.debug('Running sender')
+        # logging.debug('Running sender')
         ## sender
         params['file'] = srcfile
         params['blocksize'] = gparams['blocksize']
@@ -107,7 +107,7 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         file_size = result['size']
 
         ## receiver
-        logging.debug('Running Receiver')
+        # logging.debug('Running Receiver')
         result['address'] = sender_data_ip
         result['file'] = dstfile
         result['blocksize'] = gparams['blocksize']
@@ -172,6 +172,8 @@ def check_running():
 @app.route('/transfer/<int:transfer_id>', methods=['GET'])
 def get_transfer(transfer_id):
     transfer = Transfer.query.get_or_404(transfer_id)
+    if transfer.end_time == None: 
+        abort(make_response(jsonify(message="Need to wait for the transfer id %s" % transfer_id), 400))
     data = {
         'id' : transfer.id,
         'sender' : transfer.sender_id,
@@ -191,6 +193,7 @@ def get_transfer_for_tool(tool):
     transfers = Transfer.query.filter_by(tool=tool).all()
     data = {}
     for transfer in transfers:
+        if transfer.end_time == None: continue
         data[transfer.id] = {
         'sender' : transfer.sender_id,
         'receiver' : transfer.receiver_id,
