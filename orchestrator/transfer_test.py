@@ -115,7 +115,11 @@ class TransferTest(TestCase):
 
         response = self.client.post('/transfer/nuttcp/1/2',json=data)
         result = response.get_json()
-        assert result == {'result' : True, 'transfer' : 1}        
+        assert result == {'result' : True, 'transfer' : 1}
+
+        response = self.client.get('/running')
+        result = response.get_json()
+        assert result == [1]
 
         response = self.client.post('/wait/1')
         assert response.status_code == 200

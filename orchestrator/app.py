@@ -321,13 +321,14 @@ def wait(transfer_id):
         try:
             result, t_end_time = future.result()            
         except Exception as exc:
-            print('%r generated an exception: %s' % (srcfile, exc))
+            logging.debug('%r generated an exception: %s' % (srcfile, exc))
         else:
             file_size += result['size']
             if end_time == None or end_time < t_end_time: 
                 end_time = t_end_time            
 
     executor.shutdown()
+    del thread_executor_pools[transfer_id]
         
     transfer.file_size = file_size
     transfer.end_time = end_time
@@ -338,6 +339,13 @@ def wait(transfer_id):
         abort(make_response(jsonify(message="Unable to update transfer"), 400))   
     
     return jsonify({'result' : True})
+
+@app.route('/running', methods=['GET'])
+def get_running_transfer():
+    transfers = []
+    for i in thread_executor_pools:
+        transfers.append(i)
+    return jsonify(transfers)
 
 @app.route('/transfer/<int:transfer_id>/scale/', methods=['POST'])
 def scale_transfer(transfer_id):    
