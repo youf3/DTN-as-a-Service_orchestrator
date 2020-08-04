@@ -1,6 +1,7 @@
 import requests
 import datetime
-import os 
+import os
+import time
 from flask import Flask, request, jsonify, abort, make_response, json#, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
@@ -30,6 +31,13 @@ with app.app_context():
         migrate.init_app(app, db)
     from flask_migrate import upgrade as _upgrade
     #_upgrade(directory='orchestrator/migrations')
+
+class TransferException(Exception):
+    def __init__(self, msg):
+        self.msg = msg        
+
+    def __str__(self):
+        return self.msg
 
 class DTN(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -84,11 +92,17 @@ def init_db():
         #traceback.print_exc()
         abort(make_response(jsonify(message="Unable to add DTN"), 400))        
 
-def transfer_job(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data):
-    result = run_transfer(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data)    
-    end_time = wait_for_transfer(sender, receiver, tool, result)
-    return result, end_time
-    #return None, None
+def transfer_job(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data, timeout=None, retry = 5):
+    for i in range(0, retry):
+        result = run_transfer(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data)
+        result['timeout'] = timeout
+        try:
+            end_time = wait_for_transfer(sender, receiver, tool, result)
+        except TransferException as e:
+            time.sleep(1)
+            continue
+        return result, end_time
+    raise Exception('Retry exceeded')
 
 def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool, params):        
     global gparams
@@ -126,14 +140,20 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
 def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param):
 
     transfer_param['node'] = 'receiver'    
-    response = requests.get('http://{}/{}/poll'.format(receiver_ip, tool), json=transfer_param)
-    if not (response.status_code == 200 and response.json()[0] == 0):
-        abort(make_response(jsonify(message="Transfer has failed"), 400))
+    port = transfer_param['cport']
+    rcvr_response = requests.get('http://{}/{}/poll'.format(receiver_ip, tool), json=transfer_param)
+    if rcvr_response.status_code != 200 or rcvr_response.json()[0] != 0:
+        response = requests.get('http://{}/free_port/{}/{}'.format(sender_ip, tool, port), json=transfer_param)
+        if response.status_code != 200:
+            raise Exception('Transfer and sender cleanup failed for port %s' %port)
+        raise TransferException('Transfer has failed for port %s' %port)
+        #abort(make_response(jsonify(message="Transfer has failed"), 400))
 
     transfer_param['node'] = 'sender'    
-    response = requests.get('http://{}/{}/poll'.format(sender_ip, tool), json=transfer_param)
-    if not (response.status_code == 200 and response.json() == 0):
-        abort(make_response(jsonify(message="Transfer has failed"), 400))
+    sndr_response = requests.get('http://{}/{}/poll'.format(sender_ip, tool), json=transfer_param)
+    if sndr_response.status_code != 200 or sndr_response.json() != 0:
+        #abort(make_response(jsonify(message="Transfer has failed"), 400))
+        raise Exception('Transfer has failed')
     return datetime.datetime.utcnow()
 
 @app.route('/DTN/<int:id>')
@@ -261,6 +281,11 @@ def transfer(tool,sender_id, receiver_id):
     else:
         worker_type = 1
 
+    if 'timeout' in data and type(data['timeout']) == int:
+        timeout = data['timeout']
+    else:
+        timeout = None
+
     resultset = []
 
     if type(srcfiles) != list:
@@ -301,7 +326,7 @@ def transfer(tool,sender_id, receiver_id):
     executor = libs.ThreadExecutor.ThreadPoolExecutor(max_workers=num_workers)
     
     future_to_transfer = {
-        executor.submit(transfer_job, sender.man_addr, sender.data_addr, receiver.man_addr, srcfile, dstfile, tool, data): 
+        executor.submit(transfer_job, sender.man_addr, sender.data_addr, receiver.man_addr, srcfile, dstfile, tool, data, timeout): 
         (srcfile,dstfile) for srcfile,dstfile in zip(srcfiles, dstfiles)
         }
     thread_executor_pools[new_transfer.id] = (executor, future_to_transfer)
