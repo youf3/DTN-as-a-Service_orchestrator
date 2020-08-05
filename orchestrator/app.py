@@ -297,7 +297,7 @@ def transfer(tool,sender_id, receiver_id):
     
     if 'num_workers' in data:
         if type(data['num_workers']) != int or data['num_workers'] <= 0:
-            abort(make_response(jsonify(message="num_workers should be int larger than 0"), 400))                           
+            abort(make_response(jsonify(message="num_workers should be int larger than 0"), 400))
         else:  
             num_workers = data['num_workers']                   
     else:
@@ -336,6 +336,7 @@ def transfer(tool,sender_id, receiver_id):
 def wait(transfer_id):
     global thread_executor_pools
     transfer = Transfer.query.get_or_404(transfer_id)
+    failed_files = []
 
     file_size = 0
     end_time = None
@@ -347,6 +348,7 @@ def wait(transfer_id):
             result, t_end_time = future.result()            
         except Exception as exc:
             logging.debug('%r generated an exception: %s' % (srcfile, exc))
+            failed_files.append(srcfile)
         else:
             file_size += result['size']
             if end_time == None or end_time < t_end_time: 
@@ -363,7 +365,16 @@ def wait(transfer_id):
         traceback.print_exc()
         abort(make_response(jsonify(message="Unable to update transfer"), 400))   
     
-    return jsonify({'result' : True})
+    return jsonify({'result' : True, 'failed' : failed_files})
+
+
+@app.route('/check/<int:transfer_id>', methods=['GET'])
+def check(transfer_id):
+    if transfer_id not in thread_executor_pools:
+        return {'Unfinished' : 0}
+    states = [i._state for i in thread_executor_pools[transfer_id][1]]
+    finished = states.count('FINISHED')
+    return jsonify({'Finished': finished , 'Unfinished' : len(states) - finished})
 
 @app.route('/running', methods=['GET'])
 def get_running_transfer():
