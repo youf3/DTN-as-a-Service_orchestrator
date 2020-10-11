@@ -64,6 +64,9 @@ class _WorkItem(object):
 def _worker(executor_reference, work_queue):
     try:
         while True:
+            if len(executor_reference()._threads) > executor_reference()._max_workers and executor_reference()._exit_lock.acquire(blocking=False) :
+                _base.LOGGER.info('removing executor')
+                return    
             work_item = work_queue.get(block=True)
             if work_item is not None:
                 work_item.run()
@@ -105,7 +108,8 @@ class ThreadPoolExecutor(_base.Executor):
 
         self._max_workers = max_workers
         self._work_queue = queue.Queue()
-        self._threads = set()
+        self._threads = []
+        self._exit_lock = threading.Lock()
         self._shutdown = False
         self._shutdown_lock = threading.Lock()
         self._thread_name_prefix = (thread_name_prefix or
@@ -114,8 +118,13 @@ class ThreadPoolExecutor(_base.Executor):
     def set_max_workers(self, worker_num):
         prev_workers = self._max_workers
         self._max_workers = worker_num
-        for i in range(prev_workers, worker_num):
-            self._adjust_thread_count()
+        if prev_workers > worker_num:
+            self.reduce_threads()
+            for i in range(worker_num, prev_workers):
+                self._adjust_thread_count()
+        else:
+            for i in range(prev_workers, worker_num):
+                self._adjust_thread_count()
 
     def submit(self, fn, *args, **kwargs):
         with self._shutdown_lock:
@@ -130,13 +139,26 @@ class ThreadPoolExecutor(_base.Executor):
             return f
     submit.__doc__ = _base.Executor.submit.__doc__
 
+    def reduce_threads(self):        
+        while len(self._threads) > self._max_workers:
+            finished_thread = None
+            for i in range(0,len(self._threads)):
+                if not self._threads[i].is_alive():                     
+                    finished_thread = self._threads[i]
+                    break
+            if finished_thread != None:
+                self._threads.remove(finished_thread)
+                finished_thread.join()
+                self._exit_lock.release()
+
     def _adjust_thread_count(self):
         # When the executor gets lost, the weakref callback will wake up
         # the worker threads.
         def weakref_cb(_, q=self._work_queue):
             q.put(None)
         # TODO(bquinlan): Should avoid creating new threads if there are more
-        # idle threads than items in the work queue.
+        # idle threads than items in the work queue.        
+
         num_threads = len(self._threads)
         if num_threads < self._max_workers:
             thread_name = '%s_%d' % (self._thread_name_prefix or self,
@@ -146,7 +168,7 @@ class ThreadPoolExecutor(_base.Executor):
                                        self._work_queue))
             t.daemon = True
             t.start()
-            self._threads.add(t)
+            self._threads.append(t)
             _threads_queues[t] = self._work_queue
 
     def shutdown(self, wait=True):

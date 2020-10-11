@@ -112,13 +112,18 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         ## sender
         params['file'] = srcfile
         params['blocksize'] = gparams['blocksize']
+        if srcfile == None and 'duration' not in params:
+            abort(make_response(jsonify(message="Need duration for mem-to-mem transfer"), 400))
         response = requests.post('http://{}/sender/{}'.format(sender_ip, tool), json=params)
         result = response.json()        
         if response.status_code == 404 and 'message' in result:
             abort(make_response(jsonify(message=result['message']), 404))
         if response.status_code != 200 or result.pop('result') != True:
             abort(make_response(jsonify(message="Unable start sender"), 400))
-        file_size = result['size']
+        if srcfile == None:
+            result['duration'] = params['duration']
+        else:
+            file_size = result['size']            
 
         ## receiver
         # logging.debug('Running Receiver')
@@ -129,7 +134,8 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         response = requests.post('http://{}/receiver/{}'.format(receiver_ip, tool), json=result)
         result = response.json()
         result['dstfile'] = dstfile
-        result['size'] = file_size
+        if srcfile != None:
+            result['size'] = file_size
         
         if response.status_code != 200 or result.pop('result') != True:
             abort(make_response(jsonify(message="Unable start receiver"), 400))
@@ -350,7 +356,8 @@ def wait(transfer_id):
             logging.debug('%r generated an exception: %s' % (srcfile, exc))
             failed_files.append(srcfile)
         else:
-            file_size += result['size']
+            if 'size' in result:
+                file_size += result['size']
             if end_time == None or end_time < t_end_time: 
                 end_time = t_end_time            
 
