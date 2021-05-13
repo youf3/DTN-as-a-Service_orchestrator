@@ -21,6 +21,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 thread_executor_pools = {}
+last_sizes = {}
 
 gparams = {'blocksize' : 64}
 
@@ -276,6 +277,7 @@ def get_latency(sender_id, receiver_id):
 def transfer(tool,sender_id, receiver_id):
     global thread_executor_pools
     global gparams
+    global last_sizes   
     
     data = request.get_json()
     srcfiles = data.pop('srcfile')
@@ -292,7 +294,8 @@ def transfer(tool,sender_id, receiver_id):
     else:
         timeout = None
 
-    resultset = []
+    # resultset = []    
+    # filesizes = [i for i in files if i['name'] in srcfiles ]
 
     if type(srcfiles) != list:
         abort(make_response(jsonify(message="Malformed source file list"), 400))
@@ -317,8 +320,7 @@ def transfer(tool,sender_id, receiver_id):
         except Exception:
             abort(make_response(jsonify(message="blocksize should be integer"), 400))
 
-    latency = get_latency(sender.id, receiver.id)['latency']
-    start_time = datetime.datetime.utcnow()
+    latency = get_latency(sender.id, receiver.id)['latency']    
     new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, start_time = datetime.datetime.utcnow(), end_time = None, 
     file_size = None, num_files = len(srcfiles), tool=tool, num_workers = num_workers, latency = latency, worker_type_id = worker_type)    
     db.session.add(new_transfer)
@@ -327,15 +329,15 @@ def transfer(tool,sender_id, receiver_id):
     except sqlalchemy.exc.IntegrityError:
         traceback.print_exc()
         abort(make_response(jsonify(message="Unable to log transfer"), 400))   
-
-    start_time = datetime.datetime.utcnow()
+    
     executor = libs.ThreadExecutor.ThreadPoolExecutor(max_workers=num_workers)
     
     future_to_transfer = {
         executor.submit(transfer_job, sender.man_addr, sender.data_addr, receiver.man_addr, srcfile, dstfile, tool, data, timeout): 
         (srcfile,dstfile) for srcfile,dstfile in zip(srcfiles, dstfiles)
         }
-    thread_executor_pools[new_transfer.id] = (executor, future_to_transfer)
+    thread_executor_pools[new_transfer.id] = [executor, future_to_transfer]
+    last_sizes[new_transfer.id] = (datetime.datetime.utcnow(), 0)
     return jsonify({'result' : True, 'transfer' : new_transfer.id})
 
 @app.route('/wait/<int:transfer_id>', methods=['POST'])
@@ -357,7 +359,7 @@ def wait(transfer_id):
             failed_files.append(srcfile)
         else:
             if 'size' in result:
-                file_size += result['size']
+                file_size += result['size']                
             if end_time == None or end_time < t_end_time: 
                 end_time = t_end_time            
 
@@ -376,12 +378,23 @@ def wait(transfer_id):
 
 
 @app.route('/check/<int:transfer_id>', methods=['GET'])
-def check(transfer_id):
+def check(transfer_id):    
+
+    global last_sizes
     if transfer_id not in thread_executor_pools:
         return {'Unfinished' : 0}
     states = [i._state for i in thread_executor_pools[transfer_id][1]]
     finished = states.count('FINISHED')
-    return jsonify({'Finished': finished , 'Unfinished' : len(states) - finished})
+
+    curr_size = 0
+    for transfer in thread_executor_pools[transfer_id][1]:
+        if not transfer.done(): continue
+        result, _ = transfer.result()
+        curr_size += result['size']    
+    last_t, last_size = last_sizes[transfer_id]
+    last_sizes[transfer_id] = (datetime.datetime.utcnow(), curr_size)
+    throughput = (curr_size - last_size) / (datetime.datetime.utcnow() - last_t).seconds
+    return jsonify({'Finished': finished , 'Unfinished' : len(states) - finished, 'throughput' : throughput})
 
 @app.route('/running', methods=['GET'])
 def get_running_transfer():
@@ -405,7 +418,7 @@ def scale_transfer(transfer_id):
             abort(make_response(jsonify(message="num_workers should be integer"), 400))
         
         logging.debug('Setting num_workers to %s' % num_workers)
-        executor, _ = thread_executor_pools[transfer_id]
+        executor, _, _ = thread_executor_pools[transfer_id]
         executor.set_max_workers(num_workers)
     
     if 'blocksize' in data:
