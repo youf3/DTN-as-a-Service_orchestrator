@@ -1,0 +1,27 @@
+version: "3.8"
+networks:
+  orchestrator_net:
+services:
+  notebook:
+    #image: jupyter/scipy-notebook
+    build: ./notebook
+    ports:
+      - "8888:8888"
+    networks:
+      - orchestrator_net
+    volumes:
+      - ./db:/orchestrator/db
+      # jovyan is the default non-root user for jupyter
+      - ./work:/home/jovyan/work
+      # debug only
+      - ./notebook/dtn_orchestrator:/opt/conda/lib/python3.9/dtn_orchestrator
+
+  # Grafana png renderer for reports and alerts
+  orchestrator:
+    build: ./
+    ports:
+      - "5000:5000"
+    networks:
+      - orchestrator_net
+    volumes:
+      - ./db:/orchestrator/db

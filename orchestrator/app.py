@@ -112,11 +112,15 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         # logging.debug('Running sender')
         ## sender
         params['file'] = srcfile
+        if 'remote_mount' in params:
+            # if we're using 'dd' for NVMEoF, trim off the remote mount directory
+            # since that's only valid on the receiver side
+            params['file'] = params['file'].replace(params['remote_mount'], "")
         params['blocksize'] = gparams['blocksize']
         if srcfile == None and 'duration' not in params:
             abort(make_response(jsonify(message="Need duration for mem-to-mem transfer"), 400))
         response = requests.post('http://{}/sender/{}'.format(sender_ip, tool), json=params)
-        result = response.json()        
+        result = response.json()
         if response.status_code == 404 and 'message' in result:
             abort(make_response(jsonify(message=result['message']), 404))
         if response.status_code != 200 or result.pop('result') != True:
@@ -124,10 +128,14 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         if srcfile == None:
             result['duration'] = params['duration']
         else:
-            file_size = result['size']            
+            file_size = result['size']
 
         ## receiver
         # logging.debug('Running Receiver')
+        if 'remote_mount' in params:
+            # patch the srcfile path here too, since it got written by the sender
+            result['srcfile'] = os.path.join(params['remote_mount'], params['file'])
+
         result['address'] = sender_data_ip
         result['file'] = dstfile
         result['blocksize'] = gparams['blocksize']
@@ -145,7 +153,6 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
     return result
 
 def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param):
-
     transfer_param['node'] = 'receiver'    
     port = transfer_param['cport']
     rcvr_response = requests.get('http://{}/{}/poll'.format(receiver_ip, tool), json=transfer_param)
@@ -167,6 +174,11 @@ def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param):
 def get_DTN(id):
     target_DTN = DTN.query.get_or_404(id)
     return {'id': target_DTN.id, 'name' : target_DTN.name, 'man_addr': target_DTN.man_addr, 'data_addr' : target_DTN.data_addr, 'username' : target_DTN.username, 'interface' : target_DTN.interface}
+
+@app.route('/DTN/')
+def get_DTNs():
+    dtns = DTN.query.all()
+    return jsonify([{"name": dtn.name, "id": dtn.id, 'man_addr': dtn.man_addr, 'data_addr' : dtn.data_addr, 'username' : dtn.username, 'interface' : dtn.interface} for dtn in dtns])
 
 @app.route('/DTN/',  methods=['POST'])
 def add_DTN():
@@ -266,7 +278,7 @@ def get_worker_types():
         data[i.id] = i.description
     return jsonify(data)
 
-@app.route('/ping/<int:sender_id>/<int:receiver_id>', methods=['get'])
+@app.route('/ping/<int:sender_id>/<int:receiver_id>', methods=['GET'])
 def get_latency(sender_id, receiver_id):
     sender = DTN.query.get_or_404(sender_id)    
     receiver = DTN.query.get_or_404(receiver_id)
@@ -379,7 +391,6 @@ def wait(transfer_id):
 
 @app.route('/check/<int:transfer_id>', methods=['GET'])
 def check(transfer_id):    
-
     global last_sizes
     if transfer_id not in thread_executor_pools:
         return {'Unfinished' : 0}
