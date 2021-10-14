@@ -4,6 +4,7 @@ networks:
 services:
   notebook:
     #image: jupyter/scipy-notebook
+    # need to build notebook so we can copy the orchestrator client lib
     build: ./notebook
     ports:
       - "8888:8888"
@@ -13,14 +14,14 @@ services:
       - ./db:/orchestrator/db
       # jovyan is the default non-root user for jupyter
       - ./work:/home/jovyan/work
-      # debug only
-      - ./notebook/dtn_orchestrator:/opt/conda/lib/python3.9/dtn_orchestrator
+      # debug - allows kernel restarts to update library code
+      #- ./notebook/dtn_orchestrator:/opt/conda/lib/python3.9/dtn_orchestrator
 
-  # Grafana png renderer for reports and alerts
   orchestrator:
     build: ./
-    ports:
-      - "5000:5000"
+    # don't make the orchestrator available outside of this net
+    #ports:
+    #  - "5000:5000"
     networks:
       - orchestrator_net
     volumes:
