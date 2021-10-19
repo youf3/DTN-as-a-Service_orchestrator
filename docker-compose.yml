@@ -3,22 +3,26 @@ networks:
   orchestrator_net:
 services:
   notebook:
-    #image: jupyter/scipy-notebook
     # need to build notebook so we can copy the orchestrator client lib
     build: ./notebook
     ports:
-      - "8888:8888"
+      - "443:8000"
+    command: jupyterhub -f /jupyterhub_config.py
     networks:
       - orchestrator_net
     volumes:
-      - ./db:/orchestrator/db
+      # jupyterhub configuration
+      - ./notebook/jupyterhub_config.py:/jupyterhub_config.py:ro
+      - ./notebook/cert.cer:/cert.cer:ro
+      - ./notebook/cert.key:/cert.key:ro
       # jovyan is the default non-root user for jupyter
-      - ./work:/home/jovyan/work
+      #- ./work:/home/jovyan/work
+      - ./work:/home/
       # debug - allows kernel restarts to update library code
       #- ./notebook/dtn_orchestrator:/opt/conda/lib/python3.9/dtn_orchestrator
 
   orchestrator:
-    build: ./
+    build: ./orchestrator
     # don't make the orchestrator available outside of this net
     #ports:
     #  - "5000:5000"
