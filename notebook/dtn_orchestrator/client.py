@@ -6,6 +6,10 @@
 ##
 import requests
 import os
+import json
+from collections import namedtuple
+
+Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
 
 class DTN(object):
     def __init__(self, client, dtndata):
@@ -31,6 +35,11 @@ class DTN(object):
         else:
             raise Exception(result.text)
     
+    def create_dirs(self, dirlist):
+        mkdir_result = requests.post(f"http://{self.man_addr}/create_dir/", json=dirlist)
+        if mkdir_result.status_code != 200:
+            raise Exception(f"Error creating directories, code {mkdir_result.status_code} ({mkdir_result.text})")
+
     def ping(self, remote_id):
         return self._client.ping(self.id, remote_id)
 
@@ -76,14 +85,67 @@ class DTN(object):
             raise Exception(f"Error connecting NVMEoF, code {result.status_code}: {result.text}")
         return
 
-class NVMEConnection(object):
-    def __init__(self, client, sender, receiver, mountpoint="/remote_nvme", setup=True):
+class Connection(object):
+    def __init__(self, client, sender, receiver, setup=False, tool="nuttcp"):
         self.orchestrator = client
         self.sender = sender
         self.receiver = receiver
-        self.mountpoint = mountpoint
         self.transfer_id = None
+        self.tool = tool
         self._status = "initialized"
+
+        if setup: # run some setup if requested
+            # TODO determine setup steps
+            pass
+
+    def disconnect(self):
+        pass # nothing needed on disconnection
+
+    def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False):
+        if self._status == "disconnected":
+            raise Exception("copy after disconnect")
+
+        # get files from sender and key them by path for easy lookups
+        read_files = self.sender.files(sourcedir)
+        read_files = {f['name']: f for f in read_files}
+        
+        # full, file-only list
+        complete_source_files = []
+        # also need destination file list, parent dir is not enough
+        complete_destination_files = []
+        # generate a list of destination directories
+        created_dirs = []
+        for index, rf in enumerate(read_files):
+            if limit and index >= limit:
+                break # stop copying
+            if read_files[rf]['type'] == 'file':
+                complete_source_files.append(os.path.join(sourcedir, rf))
+                complete_destination_files.append(os.path.join(destinationdir, rf))
+            elif read_files[rf]['type'] == 'dir':
+                created_dirs.append(os.path.join(destinationdir, rf))
+        
+        # make sure directories exist on receiver
+        self.receiver.create_dirs(created_dirs)
+
+        self.transfer_id = self.orchestrator.transfer(complete_source_files, complete_destination_files,
+                self.sender.id, self.receiver.id, tool=self.tool,
+                num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy)
+        self._status = "copy initiated"
+        return Transfer(self.transfer_id, complete_source_files, complete_destination_files)
+
+    def status(self):
+        return self.orchestrator.get_transfer_status(self.transfer_id)
+
+    def get(self):
+        return self.orchestrator.get_transfer(self.transfer_id)
+
+    def finish(self):
+        return self.orchestrator.finish_transfer(self.transfer_id, sender=self.sender, tool=self.tool)
+
+class NVMEConnection(Connection):
+    def __init__(self, client, sender, receiver, mountpoint="/remote_nvme", setup=True):
+        super().__init__(client, sender, receiver, setup=False, tool="dd") # skip default setup
+        self.mountpoint = mountpoint
 
         # first, check for an existing connection
         sender_existing = self.sender.nvmeof_get()
@@ -137,14 +199,21 @@ class NVMEConnection(object):
         else:
             return {"status": self._status}
 
-class Transfer(object):
-    def __init__(self):
-        pass
-
 class DTNOrchestratorClient(object):
+    """
+    Client wrapper for the DTN Orchestrator.
+    """
     def __init__(self, host="orchestrator", port=5000):
         self.base_url = f"http://{host}:{port}/"
     
+    def _id2dtn(self, id_or_dtn):
+        if id_or_dtn is None:
+            raise ValueError("DTN ID or object cannot be None")
+        elif isinstance(id_or_dtn, DTN):
+            return id_or_dtn
+        else:
+            return self.get_dtn(id_or_dtn)
+
     def check(self):
         result = requests.get(self.base_url)
         if result.status_code == 200:
@@ -157,9 +226,12 @@ class DTNOrchestratorClient(object):
         return [DTN(self, dtnjson) for dtnjson in dtnlist]
 
     def get_dtn(self, id):
-        result = requests.get(self.base_url + f"DTN/{id}")
-        # TODO error checking
-        dtn = DTN(self, result.json())
+        try:
+            result = requests.get(self.base_url + f"DTN/{id}")
+            # TODO error checking
+            dtn = DTN(self, result.json())
+        except json.JSONDecodeError:
+            raise ValueError(f"DTN ID {id} not found on orchestrator")
         return dtn
 
     def add_dtn(self, name, management_addr, data_addr, username, interface):
@@ -196,14 +268,22 @@ class DTNOrchestratorClient(object):
         return self.add_dtn(dtn_data["name"], dtn_data["man_addr"], 
             dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"])
 
-    def delete_dtn(self, id):
+    def delete_dtn(self, dtn):
+        dtn = self._id2dtn(dtn)
         # TODO permissions checking
-        result = requests.delete(self.base_url + f"DTN/{id}")
+        result = requests.delete(self.base_url + f"DTN/{dtn.id}")
         # TODO error checking
         return result.json()
 
     def setup_nvmeof(self, sender, receiver):
+        sender = self._id2dtn(sender)
+        receiver = self._id2dtn(receiver)
         return NVMEConnection(self, sender, receiver)
+
+    def setup_connection(self, sender, receiver, tool="nuttcp"):
+        sender = self._id2dtn(sender)
+        receiver = self._id2dtn(receiver)
+        return Connection(self, sender, receiver, tool=tool)
 
     def get_transfers(self):
         result = requests.get(self.base_url + "running")
@@ -216,16 +296,46 @@ class DTNOrchestratorClient(object):
         # TODO error checking
         return result.json()
     
-    def ping(self, sender, receiver):
+    def get_transfer_status(self, id):
         # TODO permissions checking
+        result = requests.get(self.base_url + f"check/{id}")
+        if result.status_code == 200:
+            return result.json()
+    
+    def finish_transfer(self, transfer_id, sender=None, tool=None):
+        # check for transfer status first
+        status = self.get_transfer_status(transfer_id)
+        if status.get('Unfinished') == 0:
+            # get transfer data and clean up if needed
+            # TODO don't assume nuttcp as the transfer tool
+            if sender and tool:
+                sender = self._id2dtn(sender)
+                requests.get(f"{sender.man_addr}/cleanup/{tool}")
+            
+            wait_data = requests.post(self.base_url + f"wait/{transfer_id}")
+            if wait_data.status_code == 200:
+                return wait_data.json()
+            else:
+                raise Exception(f"Error finishing transfer, code {wait_data.status_code}: {str(wait_data.text)}")
+        else:
+            return status
+
+    def ping(self, sender, receiver):
         # sender/receiver may be DTN ID or DTN object
-        result = requests.get(self.base_url + f"ping/{sender}/{receiver}")
+        sender = self._id2dtn(sender)
+        receiver = self._id2dtn(receiver)
+        # TODO permissions checking
+        result = requests.get(self.base_url + f"ping/{sender.id}/{receiver.id}")
         # TODO error checking
         return result.json()       
 
     def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, num_workers=1, blocksize=8192, zerocopy=False):
+        sender = self._id2dtn(sender)
+        receiver = self._id2dtn(receiver)
         # TODO permissions checking
-        result = requests.post(self.base_url + f"transfer/{tool}/{sender}/{receiver}", json={
+        # note! file/directory checking is NOT done here, that should be 
+        # taken care of before sourcesfiles/destfiles gets passed
+        result = requests.post(self.base_url + f"transfer/{tool}/{sender.id}/{receiver.id}", json={
             "srcfile": sourcefiles,
             "dstfile": destfiles,
             "remote_mount": remote_mount,
@@ -233,4 +343,9 @@ class DTNOrchestratorClient(object):
             "blocksize": blocksize,
             "zerocopy": zerocopy
         })
-        return result.json()
+        if result.status_code == 200:
+            # get the transfer ID and start waiting
+            transfer_id = result.json().get("transfer")
+            return transfer_id
+        else:
+            raise Exception(f"Error starting transfer: {str(result.json)}")
