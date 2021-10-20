@@ -112,7 +112,7 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         # logging.debug('Running sender')
         ## sender
         params['file'] = srcfile
-        if 'remote_mount' in params:
+        if 'remote_mount' in params and params['remote_mount']:
             # if we're using 'dd' for NVMEoF, trim off the remote mount directory
             # since that's only valid on the receiver side
             params['file'] = params['file'].replace(params['remote_mount'], "")
@@ -132,14 +132,14 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
 
         ## receiver
         # logging.debug('Running Receiver')
-        if 'remote_mount' in params:
+        if 'remote_mount' in params and params['remote_mount']:
             # patch the srcfile path here too, since it got written by the sender
             result['srcfile'] = os.path.join(params['remote_mount'], params['file'])
 
         result['address'] = sender_data_ip
         result['file'] = dstfile
         result['blocksize'] = gparams['blocksize']
-        
+
         response = requests.post('http://{}/receiver/{}'.format(receiver_ip, tool), json=result)
         result = response.json()
         result['dstfile'] = dstfile
