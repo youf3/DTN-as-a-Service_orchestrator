@@ -12,6 +12,13 @@ from collections import namedtuple
 Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
 
 class DTN(object):
+    """
+    Object that represents a DTN object on the orchestrator. However, this object
+    also facilitates functions that talk directly to the DTN agent.
+
+    This allows checking local files, testing latency to other DTNs, and configuring
+    NVME over fabric (NVMEoF).
+    """
     def __init__(self, client, dtndata):
         self._client = client
         if 'id' not in dtndata.keys():
@@ -28,6 +35,14 @@ class DTN(object):
             return str(self.id if hasattr(self, "id") else 0)
 
     def files(self, filedir=None):
+        """
+        Retrieve a list of files available on the DTN.
+        
+        :param filedir: Optional parent file directory to filter.
+
+        :returns: A list of dictionaries containing file modification time, path, 
+        type (file or dir) and size.
+        """
         # TODO permissions checking
         result = requests.get(f"http://{self.man_addr}/files/{filedir if filedir else ''}")
         if result.status_code == 200:
@@ -36,20 +51,39 @@ class DTN(object):
             raise Exception(result.text)
     
     def create_dirs(self, dirlist):
+        """
+        Create a directory on the DTN.
+
+        :param dirlist: List of directories to create.
+        """
         mkdir_result = requests.post(f"http://{self.man_addr}/create_dir/", json=dirlist)
         if mkdir_result.status_code != 200:
             raise Exception(f"Error creating directories, code {mkdir_result.status_code} ({mkdir_result.text})")
 
     def ping(self, remote_id):
+        """
+        Ping (run latency test) to another DTN.
+
+        :param remote_id: Remote DTN object or ID.
+        :returns: Float/double that represents latency between this DTN and the
+        remote DTN in seconds.
+        """
         return self._client.ping(self.id, remote_id)
 
     def nvmeof_get(self):
+        """
+        Get NVME drives available on the DTN.
+        """
         result = requests.get(f"http://{self.man_addr}/nvme/devices")
         if result.status_code != 200:
             raise Exception(f"Error retrieving NVMEoF data")
         return result.json()
 
     def nvmeof_setup(self):
+        """
+        Set up the NVME subsystem so other DTNs can remotely interact with this 
+        DTN's drives via NVMEoF.
+        """
         result = requests.post(f"http://{self.man_addr}/nvme/setup", json={
             'addr': self.data_addr,
             'numa': 0 # FIXME
@@ -59,6 +93,9 @@ class DTN(object):
         return result.json()
 
     def nvmeof_stop(self):
+        """
+        Stop the NVME subsystem that allows remote interaction via NVMEoF.
+        """
         result = requests.delete(f"http://{self.man_addr}/nvme/setup", json={
             'addr': self.data_addr,
             'numa': 0 # FIXME
@@ -68,6 +105,12 @@ class DTN(object):
         return
 
     def nvmeof_connect(self, remote_addr, mountpoint="/remote_nvme"):
+        """
+        Connect to a remote DTN's NVME subsystem so remote drives can be mounted.
+
+        :param remote_addr: IP address of the remote DTN.
+        :param mountpoint: Optional mountpoint to mount the remote NVME drive(s).
+        """
         result = requests.post(f"http://{self.man_addr}/nvme/connect", json={
             'remote_addr': remote_addr,
             'mountpoint': mountpoint,
@@ -78,6 +121,9 @@ class DTN(object):
         return result.json()
     
     def nvmeof_disconnect(self, remote_addr):
+        """
+        Disconnect from a remote DTN's NVME subsystem. This closes the NVMEoF connection.
+        """
         result = requests.delete(f"http://{self.man_addr}/nvme/connect", json={
             'remote_addr': remote_addr,
         })
@@ -86,6 +132,10 @@ class DTN(object):
         return
 
 class Connection(object):
+    """
+    Object that represents a connection between two DTNs. This connection can facilitate
+    file transfers between these DTNs.
+    """
     def __init__(self, client, sender, receiver, setup=False, tool="nuttcp"):
         self.orchestrator = client
         self.sender = sender
@@ -99,9 +149,27 @@ class Connection(object):
             pass
 
     def disconnect(self):
+        """
+        Stop this connection. The object can be safely deleted after this is run.
+        """
+        self._status = "disconnected"
         pass # nothing needed on disconnection
 
     def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False):
+        """
+        Copy all files from a sender DTN's source directory to a receiver DTN's destination directory.
+        This starts a file transfer between two DTNs, and provides data to track transfer progress.
+
+        :param sourcedir: Source directory, must exist on the sender DTN.
+        :param destinationdir: Destination directory, must exist on the receiver DTN.
+        :limit: Optional limit on number of directories/files to copy.
+        :num_workers: Number of worker processes to facilitate the transfer.
+        :blocksize: Block size for the transfer in bytes.
+        :zerocopy: Zerocopy setting for nuttcp.
+
+        :returns: A Transfer namedtuple that contains the transfer ID, and list 
+        of source and destination files that will be copied.
+        """
         if self._status == "disconnected":
             raise Exception("copy after disconnect")
 
@@ -134,15 +202,35 @@ class Connection(object):
         return Transfer(self.transfer_id, complete_source_files, complete_destination_files)
 
     def status(self):
-        return self.orchestrator.get_transfer_status(self.transfer_id)
+        """
+        Get the current status of the connection transfer, if it has been started.
+        """
+        if self.transfer_id:
+            return self.orchestrator.get_transfer_status(self.transfer_id)
 
     def get(self):
-        return self.orchestrator.get_transfer(self.transfer_id)
+        """
+        Get transfer data of the current transfer, if it has completed.
+        """
+        if self.transfer_id:
+            return self.orchestrator.get_transfer(self.transfer_id)
 
-    def finish(self):
-        return self.orchestrator.finish_transfer(self.transfer_id, sender=self.sender, tool=self.tool)
+    def finish(self, cleanup=False):
+        """
+        Finish the transfer when all files have been copied.
+
+        :param cleanup: Optional boolean flag, enable to facilitate cleanup 
+        (dependent on the tool used for the transfer)
+        """
+        if self.transfer_id:
+            return self.orchestrator.finish_transfer(self.transfer_id,
+                    sender=(self.sender if cleanup else None),
+                    tool=(self.tool if cleanup else None))
 
 class NVMEConnection(Connection):
+    """
+    Object that adds NVME connection functions on top of the regular Connection object.
+    """
     def __init__(self, client, sender, receiver, mountpoint="/remote_nvme", setup=True):
         super().__init__(client, sender, receiver, setup=False, tool="dd") # skip default setup
         self.mountpoint = mountpoint
@@ -172,6 +260,11 @@ class NVMEConnection(Connection):
             self.mountpoint = remote_devices[0].get('mounted')
 
     def disconnect(self):
+        """
+        Shut down the NVMEoF connection between the sender and receiver.
+        This disconnects on the receiver side, and shuts down the subsystem on the
+        sender side.
+        """
         self.receiver.nvmeof_disconnect(self.sender.man_addr)
         # sender errors should not be catastrophic
         try:
@@ -181,6 +274,10 @@ class NVMEConnection(Connection):
         self._status = "disconnected"
 
     def copy(self, sourcefiles, destination):
+        """
+        Copy a list of source files from the sender DTN's remotely mounted NVME drives
+        to a destination directory on the receiver DTN.
+        """
         if self._status == "disconnected":
             raise Exception("copy after disconnect")
 
@@ -193,6 +290,9 @@ class NVMEConnection(Connection):
         return self.transfer_id
 
     def status(self):
+        """
+        Get the transfer data of the current transfer, if finished.
+        """
         if self._status == "copying":
             transfer_status = self.orchestrator.get_transfer(self.transfer_id)
             return transfer_status
@@ -215,6 +315,9 @@ class DTNOrchestratorClient(object):
             return self.get_dtn(id_or_dtn)
 
     def check(self):
+        """
+        Check connection status between this host and the orchestrator.
+        """
         result = requests.get(self.base_url)
         if result.status_code == 200:
             return "OK"
@@ -222,10 +325,21 @@ class DTNOrchestratorClient(object):
             raise Exception(result.text)
 
     def list_dtns(self):
+        """
+        Get a list of known DTN Objects from the orchestrator.
+        
+        :returns: List of DTN objects.
+        """
         dtnlist = requests.get(self.base_url + f"DTN/").json()
         return [DTN(self, dtnjson) for dtnjson in dtnlist]
 
     def get_dtn(self, id):
+        """
+        Get a specific DTN from the orchestrator by DTN ID.
+
+        :param id: DTN ID as an integer to look up.
+        :returns: DTN object if found, otherwise a ValueError is raised.
+        """
         try:
             result = requests.get(self.base_url + f"DTN/{id}")
             # TODO error checking
@@ -235,6 +349,18 @@ class DTNOrchestratorClient(object):
         return dtn
 
     def add_dtn(self, name, management_addr, data_addr, username, interface):
+        """
+        Manually add a DTN to the orchestrator. It does not have to be running
+        or reachable to be added.
+
+        :param name: Name of the DTN.
+        :management_addr: Management IP address and port for the DTN agent.
+        :data_addr: Dataplane IP address for the DTN - used for transfers.
+        :username: Username for file permissions on certain operations.
+        :interface: Dataplane interface on the DTN.
+
+        :returns: A DTN object with the created DTN data.
+        """
         # before adding, check for an existing one (identical name & mgmt addr)
         dtnlist = self.list_dtns()
         for dtn in dtnlist:
@@ -256,6 +382,20 @@ class DTNOrchestratorClient(object):
         return self.get_dtn(result.json()['id'])
 
     def register_dtn(self, address, data_addr=None, interface=None):
+        """
+        Auto register a DTN. Unlike add_dtn(), this requires the DTN to be accessible
+        and to have the iCAIR DTN agent running.
+
+        :param address: Management IP Address and port of the DTN.
+        :param data_addr: Optional dataplane IP address - if this is not given,
+        the DTN agent will attempt to discover it by the interface parameter or
+        by finding the fastest interface.
+        :param interface: Optional dataplane interface - if this is not given,
+        the DTN agent will attempt to discover it by the data_addr parameter or
+        by finding the fastest interface.
+
+        :returns: A DTN object with the created DTN data.
+        """
         result = requests.post(f"http://{address}/register", json={
             "address": address,
             "data_addr": data_addr,
@@ -269,6 +409,13 @@ class DTNOrchestratorClient(object):
             dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"])
 
     def delete_dtn(self, dtn):
+        """
+        Delete a DTN from the orchestrator.
+
+        :param dtn: DTN object or DTN ID.
+
+        :returns: The direct orchestrator API result.
+        """
         dtn = self._id2dtn(dtn)
         # TODO permissions checking
         result = requests.delete(self.base_url + f"DTN/{dtn.id}")
@@ -276,33 +423,85 @@ class DTNOrchestratorClient(object):
         return result.json()
 
     def setup_nvmeof(self, sender, receiver):
+        """
+        Set up an NVME over fabric (NVMEoF) connection between two DTNs.
+
+        :param sender: Sender DTN object or ID. This should have some NVME drives
+        that can be remotely mounted.
+        :param receiver: Receiver DTN object or ID. This should be able to access
+        the sender DTN over port 4420 from NVME over fabric.
+
+        :returns: A configured NVMEConnection object.
+        """
         sender = self._id2dtn(sender)
         receiver = self._id2dtn(receiver)
         return NVMEConnection(self, sender, receiver)
 
     def setup_connection(self, sender, receiver, tool="nuttcp"):
+        """
+        Set up a transfer connection between two DTNs.
+
+        :param sender: Sender DTN object or ID.
+        :param receiver: Receiver DTN object or ID.
+        :param tool: Optional tool name, this will be used for the file transfer.
+
+        :returns: A configured Connection object.
+        """
         sender = self._id2dtn(sender)
         receiver = self._id2dtn(receiver)
         return Connection(self, sender, receiver, tool=tool)
 
     def get_transfers(self):
+        """
+        Get a list of running transfers from the orchestrator.
+        """
         result = requests.get(self.base_url + "running")
         # TODO error checking
         return result.json()
 
     def get_transfer(self, id):
+        """
+        Get information about a specific transfer by Transfer ID.
+
+        :param id: Transfer ID as an integer.
+        :returns: Transfer data if available, otherwise a dictionary with the
+        message "need to wait for transfer #id".
+        """
         # TODO permissions checking
         result = requests.get(self.base_url + f"transfer/{id}")
         # TODO error checking
         return result.json()
     
     def get_transfer_status(self, id):
+        """
+        Get the status of a specific transfer currently in progress.
+
+        :param id: Transfer ID as an integer.
+        :returns: Transfer status data as a dictionary, usually in this format:
+        {
+            'Finished': 1,
+            'Unfinished': 2,
+            'throughput': 379.2342
+        }
+        """
         # TODO permissions checking
         result = requests.get(self.base_url + f"check/{id}")
         if result.status_code == 200:
             return result.json()
     
     def finish_transfer(self, transfer_id, sender=None, tool=None):
+        """
+        Complete a transfer if and when there are no more unfinished files.
+
+        :param transfer_id: Transfer ID as an integer.
+        :param sender: Optional sender DTN object or ID. If given with tool, this
+        can be used to clean up the transfer.
+        :param tool: Optional tool name. If given with sender, this can be used to 
+        clean up the transfer.
+
+        :returns: A status dictionary if the transfer has not finished, otherwise
+        a transfer dictionary that has details about transfer statistics.
+        """
         # check for transfer status first
         status = self.get_transfer_status(transfer_id)
         if status.get('Unfinished') == 0:
@@ -321,6 +520,14 @@ class DTNOrchestratorClient(object):
             return status
 
     def ping(self, sender, receiver):
+        """
+        Run a ping/latency test between two DTNs.
+
+        :param sender: Source DTN object or ID.
+        :param receiver: Destination DTN object or ID.
+
+        :returns: A float/double that represents latency in seconds.
+        """
         # sender/receiver may be DTN ID or DTN object
         sender = self._id2dtn(sender)
         receiver = self._id2dtn(receiver)
@@ -330,6 +537,19 @@ class DTNOrchestratorClient(object):
         return result.json()       
 
     def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, num_workers=1, blocksize=8192, zerocopy=False):
+        """
+        Initiate a transfer between two DTNs with specific lists of files.
+
+        :param sourcefiles: A list of source files (no directories!) to copy from the sender DTN.
+        :param destfiles: A list of destination filenames to write on the receiver DTN.
+        :sender: Sender DTN object or ID.
+        :receiver: Receiver DTN object or ID.
+        :tool: Optional transfer tool name.
+        :remote_mount: Optional remote mount location for NVMEoF connections.
+        :num_workers: Number of worker processes to facilitate the transfer.
+        :blocksize: Block size for the transfer in bytes.
+        :zerocopy: Zerocopy setting for nuttcp.
+        """
         sender = self._id2dtn(sender)
         receiver = self._id2dtn(receiver)
         # TODO permissions checking
