@@ -1,5 +1,8 @@
 FROM jupyterhub/jupyterhub
 
+# fix NAME_REGEX so CILogon ePPNs work for unix usernames
+RUN echo "NAME_REGEX='^[a-z][-.@a-z0-9]*$'" >> /etc/adduser.conf
+
 # oauthenticator needed for CILogon, notebook for multi-user setup
 RUN python3 -m pip install oauthenticator notebook
 
