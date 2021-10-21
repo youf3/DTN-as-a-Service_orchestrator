@@ -7,6 +7,8 @@
 import requests
 import os
 import json
+import getpass
+import jwt
 from collections import namedtuple
 
 Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
@@ -34,6 +36,11 @@ class DTN(object):
         except:
             return str(self.id if hasattr(self, "id") else 0)
 
+    def _token_header(self):
+        if hasattr(self, 'jwt_token') and self.jwt_token:
+            encoded_data = {'sub': getpass.getuser()}
+            return {"Authorization": f"Bearer {jwt.encode(encoded_data, self.jwt_token, 'HS256')}"}
+
     def files(self, filedir=None):
         """
         Retrieve a list of files available on the DTN.
@@ -44,7 +51,7 @@ class DTN(object):
         type (file or dir) and size.
         """
         # TODO permissions checking
-        result = requests.get(f"http://{self.man_addr}/files/{filedir if filedir else ''}")
+        result = requests.get(f"http://{self.man_addr}/files/{filedir if filedir else ''}", headers=self._token_header())
         if result.status_code == 200:
             return result.json()
         else:
@@ -56,7 +63,7 @@ class DTN(object):
 
         :param dirlist: List of directories to create.
         """
-        mkdir_result = requests.post(f"http://{self.man_addr}/create_dir/", json=dirlist)
+        mkdir_result = requests.post(f"http://{self.man_addr}/create_dir/", headers=self._token_header(), json=dirlist)
         if mkdir_result.status_code != 200:
             raise Exception(f"Error creating directories, code {mkdir_result.status_code} ({mkdir_result.text})")
 
@@ -74,7 +81,7 @@ class DTN(object):
         """
         Get NVME drives available on the DTN.
         """
-        result = requests.get(f"http://{self.man_addr}/nvme/devices")
+        result = requests.get(f"http://{self.man_addr}/nvme/devices", headers=self._token_header())
         if result.status_code != 200:
             raise Exception(f"Error retrieving NVMEoF data")
         return result.json()
@@ -84,7 +91,7 @@ class DTN(object):
         Set up the NVME subsystem so other DTNs can remotely interact with this 
         DTN's drives via NVMEoF.
         """
-        result = requests.post(f"http://{self.man_addr}/nvme/setup", json={
+        result = requests.post(f"http://{self.man_addr}/nvme/setup", headers=self._token_header(), json={
             'addr': self.data_addr,
             'numa': 0 # FIXME
         })
@@ -96,7 +103,7 @@ class DTN(object):
         """
         Stop the NVME subsystem that allows remote interaction via NVMEoF.
         """
-        result = requests.delete(f"http://{self.man_addr}/nvme/setup", json={
+        result = requests.delete(f"http://{self.man_addr}/nvme/setup", headers=self._token_header(), json={
             'addr': self.data_addr,
             'numa': 0 # FIXME
         })
@@ -111,7 +118,7 @@ class DTN(object):
         :param remote_addr: IP address of the remote DTN.
         :param mountpoint: Optional mountpoint to mount the remote NVME drive(s).
         """
-        result = requests.post(f"http://{self.man_addr}/nvme/connect", json={
+        result = requests.post(f"http://{self.man_addr}/nvme/connect", headers=self._token_header(), json={
             'remote_addr': remote_addr,
             'mountpoint': mountpoint,
             'num_disk': 1 # FIXME read from sender side
@@ -124,12 +131,28 @@ class DTN(object):
         """
         Disconnect from a remote DTN's NVME subsystem. This closes the NVMEoF connection.
         """
-        result = requests.delete(f"http://{self.man_addr}/nvme/connect", json={
+        result = requests.delete(f"http://{self.man_addr}/nvme/connect", headers=self._token_header(), json={
             'remote_addr': remote_addr,
         })
         if result.status_code != 200:
             raise Exception(f"Error connecting NVMEoF, code {result.status_code}: {result.text}")
         return
+
+    def get(self, url, **kwargs):
+        """
+        Run a REST GET directly to the client, while auto-adding the authorization token.
+        This accepts all parameters from requests.get().
+        """
+        kwargs['headers'] = self._token_header()
+        return requests.get(f"http://{self.man_addr}/{url}", **kwargs)
+    
+    def post(self, url, **kwargs):
+        """
+        Run a REST POST directly to the client, while auto-adding the authorization token.
+        This accepts all parameters from requests.post().
+        """
+        kwargs['headers'] = self._token_header()
+        return requests.post(f"http://{self.man_addr}/{url}", **kwargs)
 
 class Connection(object):
     """
@@ -348,7 +371,7 @@ class DTNOrchestratorClient(object):
             raise ValueError(f"DTN ID {id} not found on orchestrator")
         return dtn
 
-    def add_dtn(self, name, management_addr, data_addr, username, interface):
+    def add_dtn(self, name, management_addr, data_addr, username, interface, jwt_token=""):
         """
         Manually add a DTN to the orchestrator. It does not have to be running
         or reachable to be added.
@@ -373,7 +396,8 @@ class DTNOrchestratorClient(object):
             'man_addr': management_addr,
             'data_addr': data_addr,
             'username': username,
-            'interface': interface
+            'interface': interface,
+            'jwt_token': jwt_token
             })
         # TODO error checking
         if result.status_code != 200:
@@ -406,7 +430,8 @@ class DTNOrchestratorClient(object):
             raise Exception(result.text)
         dtn_data = result.json()
         return self.add_dtn(dtn_data["name"], dtn_data["man_addr"], 
-            dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"])
+            dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"],
+            jwt_token=dtn_data.get("jwt_token", ""))
 
     def delete_dtn(self, dtn):
         """
@@ -509,7 +534,7 @@ class DTNOrchestratorClient(object):
             # TODO don't assume nuttcp as the transfer tool
             if sender and tool:
                 sender = self._id2dtn(sender)
-                requests.get(f"{sender.man_addr}/cleanup/{tool}")
+                requests.get(f"{sender.man_addr}/cleanup/{tool}", headers=sender._token_header())
             
             wait_data = requests.post(self.base_url + f"wait/{transfer_id}")
             if wait_data.status_code == 200:
@@ -532,9 +557,14 @@ class DTNOrchestratorClient(object):
         sender = self._id2dtn(sender)
         receiver = self._id2dtn(receiver)
         # TODO permissions checking
-        result = requests.get(self.base_url + f"ping/{sender.id}/{receiver.id}")
+        result = requests.get(self.base_url + f"ping/{sender.id}/{receiver.id}", headers=sender._token_header())
         # TODO error checking
-        return result.json()       
+        if result.status_code == 401:
+            raise Exception("Not authorized (DTN not registered?)")
+        if result.status_code == 200:
+            return result.json()
+        else:
+            raise Exception(f"Error {result.status_code} running ping from {sender.name}")
 
     def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, num_workers=1, blocksize=8192, zerocopy=False):
         """
@@ -558,6 +588,9 @@ class DTNOrchestratorClient(object):
         result = requests.post(self.base_url + f"transfer/{tool}/{sender.id}/{receiver.id}", json={
             "srcfile": sourcefiles,
             "dstfile": destfiles,
+            # sender/receiver auth
+            "sender_token": sender.jwt_token,
+            "receiver_token": receiver.jwt_token,
             "remote_mount": remote_mount,
             "num_workers": num_workers,
             "blocksize": blocksize,
