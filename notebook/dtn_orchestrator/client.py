@@ -9,6 +9,10 @@ import os
 import json
 import getpass
 import jwt
+import time
+import pandas
+from prometheus_http_client import Prometheus
+from http.client import HTTPException
 from collections import namedtuple
 
 Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
@@ -154,6 +158,92 @@ class DTN(object):
         kwargs['headers'] = self._token_header()
         return requests.post(f"http://{self.man_addr}/{url}", **kwargs)
 
+class StatsExtractor(object):
+    """
+    Statistics extractor for file transfers. This updates data on a remote
+    Prometheus server for performance analysis.
+    """
+    def __init__(self, client, extractor_url="http://165.124.33.158:9091"):
+        self.orchestrator = client
+        self.extractor_url = extractor_url
+        self.promclient = Prometheus()
+        self.promclient.url = self.extractor_url
+    
+    def _prettify_header(self, metric):
+        metrics_to_remove = ['instance', 'job', 'mode', '__name__', 'container', 'endpoint', 'namespace', 'pod', 'prometheus', 'service']
+        for i in metrics_to_remove:
+            if i in metric: del metric[i]
+        if len(metric) > 1 : raise Exception('too many metric labels')
+        else:
+            return next(iter(metric.keys()))
+
+    def extract(self, sender, receiver, start_time=time.time(), end_time=time.time() + 1):
+        """
+        Extract metrics from the Prometheus server. Requires sender/receiver data as well as
+        start and end time to narrow down metrics to this specific transfer.
+
+        :param sender: Sender DTN object or ID.
+        :param receiver: Receiver DTN object or ID.
+        :param start_time: Start time of the transfer.
+        :param end_time: End time of the transfer.
+
+        :returns: A Pandas DataFrame object if metrics were found.
+        """
+        sender = self.orchestrator._id2dtn(sender)
+        receiver = self.orchestrator._id2dtn(receiver)
+
+        # monitor address = management address with a different port (default 9100)
+        sender_mon_addr = sender.man_addr.split(':')[0] + ":9100"
+        receiver_mon_addr = receiver.man_addr.split(':')[0] + ":9100"
+        
+        STEP = 15
+        AVG_INT = 15
+        MAX_RES = 11000
+        query = (
+        'label_replace(sum by (instance)(irate(node_network_transmit_bytes_total{{instance=~"{4}.*", device="{2}"}}[{1}m])), "network_throughput", "$0", "instance", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_written_bytes_total{{instance=~"{5}.*", device=~"nvme.*"}}[{1}m])),"Goodput", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(1 - irate(node_cpu_seconds_total{{mode="idle", instance="{4}"}}[1m])),"CPU", "$0", "job", "(.+)") '
+        'or label_replace(max by (container)(container_memory_working_set_bytes{{namespace="{3}", container=~"{0}.*"}}), "Memory_used", "$0", "container", "(.+)") '
+        'or label_replace(node_memory_Active_bytes{{instance="{4}"}}, "Memory_used", "$0", "instance", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_read_bytes_total{{instance=~"{4}.*", device=~"nvme.*"}}[{1}m])),"NVMe_transfer_bytes", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_io_time_seconds_total{{instance=~"{4}.*", device=~"nvme.*"}}[{1}m])),"NVMe_total_util", "$0", "job", "(.+)") '
+        'or label_replace(count by (job)(node_disk_io_time_seconds_total{{instance=~"{4}.*", device=~"nvme[0-7]n1"}}),"Storage_count", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(node_network_speed_bytes{{instance=~"{4}.*", device="{2}"}} * 8), "NIC_speed", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_netstat_Tcp_RetransSegs{{instance=~"{4}.*"}}[{1}m])), "Packet_losses", "$0", "job", "(.+)") '
+        'or label_replace(avg by (job)((node_hwmon_temp_celsius{{instance=~"{4}.*"}})), "CPU_temp", "$0", "job", "(.+)") '
+        'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="Ciena_Ottawa"}}), "CPU_number", "$0", "job", "(.+)") '
+        '').format(sender.name, AVG_INT, sender.interface, 'dtnaas', sender_mon_addr, receiver_mon_addr)
+        dataset = None
+        
+        while end_time > start_time:        
+            data_in_period = None
+            max_ts = start_time + (STEP * MAX_RES) 
+            next_hop_ts = end_time if max_ts > end_time else max_ts
+            print('Getting data for {} : {}'.format(start_time, end_time))
+            res = self.promclient.query_rang(metric=query, start=start_time, end=next_hop_ts, step=STEP)
+            if '401 Authorization Required' in res:
+                raise HTTPException(res)
+            response = json.loads(res)
+            if response['status'] != 'success':
+                raise Exception('Failed to query Prometheus server')
+            
+            for result in response['data']['result']:
+                result['metric'] = self._prettify_header(result['metric'])
+                df = pandas.DataFrame(data=result['values'], columns = ['Time', result['metric']], dtype=float)            
+                df['Time'] = pandas.to_datetime(df['Time'], unit='s')
+                df.set_index('Time', inplace=True)
+                data_in_period = df if data_in_period is None else data_in_period.merge(df, how='outer',  on='Time').sort_index()
+            
+            dataset = data_in_period if dataset is None else dataset.append(data_in_period)
+            start_time = next_hop_ts
+        cols = dataset.columns.tolist()
+        labels_to_rearrange = ['NVMe_total_util', 'NVMe_transfer_bytes']    
+        for i in labels_to_rearrange:
+            cols.remove(i)
+            cols.insert(0,i)
+
+        return dataset[cols]
+
 class Connection(object):
     """
     Object that represents a connection between two DTNs. This connection can facilitate
@@ -167,6 +257,12 @@ class Connection(object):
         self.tool = tool
         self._status = "initialized"
 
+        self.extractor = StatsExtractor(client)
+        self.pre_csv = ""
+        self.post_csv = ""
+        self.latency = None
+        self.blocksize = None
+
         if setup: # run some setup if requested
             # TODO determine setup steps
             pass
@@ -178,7 +274,7 @@ class Connection(object):
         self._status = "disconnected"
         pass # nothing needed on disconnection
 
-    def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False):
+    def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
         """
         Copy all files from a sender DTN's source directory to a receiver DTN's destination directory.
         This starts a file transfer between two DTNs, and provides data to track transfer progress.
@@ -218,6 +314,18 @@ class Connection(object):
         # make sure directories exist on receiver
         self.receiver.create_dirs(created_dirs)
 
+        try:
+            # get latency and blocksize for metrics later
+            self.latency = self.orchestrator.ping(self.sender, self.receiver).get('latency')
+            self.blocksize = blocksize
+
+            pre_dataframe = self.extractor.extract(self.sender, self.receiver)
+            self.pre_csv = pre_dataframe.to_csv(header=True, index=False)
+        except Exception as e:
+            print('Stats error: ' + str(e))
+            if require_stats:
+                raise e
+
         self.transfer_id = self.orchestrator.transfer(complete_source_files, complete_destination_files,
                 self.sender.id, self.receiver.id, tool=self.tool,
                 num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy)
@@ -242,13 +350,31 @@ class Connection(object):
         """
         Finish the transfer when all files have been copied.
 
+        This object's .pre_csv and .post_csv are also written.
+
         :param cleanup: Optional boolean flag, enable to facilitate cleanup 
         (dependent on the tool used for the transfer)
         """
         if self.transfer_id:
-            return self.orchestrator.finish_transfer(self.transfer_id,
+            finish_data = self.orchestrator.finish_transfer(self.transfer_id,
                     sender=(self.sender if cleanup else None),
                     tool=(self.tool if cleanup else None))
+
+            try:
+                post_dataframe = self.extractor.extract(self.sender, self.receiver,
+                    start_time=finish_data['start_time'], end_time=finish_data['end_time'])
+                # modify the dataframe before saving
+                mean_df = pandas.DataFrame(post_dataframe.mean())
+                df_t = mean_df.T
+                df_t['num_workers']= finish_data['num_workers']
+                df_t['num_files']= finish_data['num_files']
+                df_t['blocksize']= self.blocksize
+                df_t['latency']= self.latency
+                self.post_csv = df_t.to_csv(header=True, index=False)
+            except Exception as e:
+                print('Stats error: ' + str(e))
+
+            return finish_data
 
 class NVMEConnection(Connection):
     """
@@ -585,7 +711,8 @@ class DTNOrchestratorClient(object):
         # TODO permissions checking
         # note! file/directory checking is NOT done here, that should be 
         # taken care of before sourcesfiles/destfiles gets passed
-        result = requests.post(self.base_url + f"transfer/{tool}/{sender.id}/{receiver.id}", json={
+        result = requests.post(self.base_url + f"transfer/{tool}/{sender.id}/{receiver.id}", headers=sender._token_header(),
+        json={
             "srcfile": sourcefiles,
             "dstfile": destfiles,
             # sender/receiver auth
