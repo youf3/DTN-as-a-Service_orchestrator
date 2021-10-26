@@ -17,6 +17,21 @@ from collections import namedtuple
 
 Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
 
+# TODO save these in the DTN object on the orchestrator. 
+#  This hardcoded/static map is needed since Prometheus jobs are different from
+#  the actual hostnames and registered DTN names.
+PROMETHEUS_JOBS = {
+    "138.44.15.78:5001": "aarnet01",
+    "74.114.96.98:5000": "starlight01",
+    "109.171.131.68:5000": "kaust01",
+    "210.119.23.12:5000": "kisti01",
+    "145.146.1.10:5000": "uva01",
+    "213.135.51.226:5000": "icm01",
+    "193.166.254.54:5000": "csc01",
+    "193.166.254.50:5000": "csc02",
+    "103.72.192.66:5001": "nscc01"
+}
+
 class DTN(object):
     """
     Object that represents a DTN object on the orchestrator. However, this object
@@ -211,8 +226,8 @@ class StatsExtractor(object):
         'or label_replace(sum by (job)(node_network_speed_bytes{{instance=~"{4}.*", device="{2}"}} * 8), "NIC_speed", "$0", "job", "(.+)") '
         'or label_replace(sum by (job)(irate(node_netstat_Tcp_RetransSegs{{instance=~"{4}.*"}}[{1}m])), "Packet_losses", "$0", "job", "(.+)") '
         'or label_replace(avg by (job)((node_hwmon_temp_celsius{{instance=~"{4}.*"}})), "CPU_temp", "$0", "job", "(.+)") '
-        'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="Ciena_Ottawa"}}), "CPU_number", "$0", "job", "(.+)") '
-        '').format(sender.name, AVG_INT, sender.interface, 'dtnaas', sender_mon_addr, receiver_mon_addr)
+        'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="{5}"}}), "CPU_number", "$0", "job", "(.+)") '
+        '').format(sender.name, AVG_INT, sender.interface, 'dtnaas', sender_mon_addr, receiver_mon_addr, PROMETHEUS_JOBS.get(sender.man_addr))
         dataset = None
         
         while end_time > start_time:        
@@ -346,6 +361,24 @@ class Connection(object):
         if self.transfer_id:
             return self.orchestrator.get_transfer(self.transfer_id)
 
+    def get_stats(self):
+        """
+        Collect transfer statistics from Prometheus.
+        """
+        finish_data = self.get()
+        post_dataframe = self.extractor.extract(self.sender, self.receiver,
+            start_time=finish_data['start_time'], end_time=finish_data['end_time'])
+        # modify the dataframe before saving
+        mean_df = pandas.DataFrame(post_dataframe.mean())
+        df_t = mean_df.T
+        df_t['num_workers']= finish_data['num_workers']
+        df_t['num_files']= finish_data['num_files']
+        df_t['blocksize']= self.blocksize
+        df_t['latency']= self.latency
+        self.post_csv = df_t.to_csv(header=True, index=False)
+
+        return self.post_csv
+
     def finish(self, cleanup=False):
         """
         Finish the transfer when all files have been copied.
@@ -356,25 +389,37 @@ class Connection(object):
         (dependent on the tool used for the transfer)
         """
         if self.transfer_id:
-            finish_data = self.orchestrator.finish_transfer(self.transfer_id,
+            return self.orchestrator.finish_transfer(self.transfer_id,
                     sender=(self.sender if cleanup else None),
                     tool=(self.tool if cleanup else None))
 
-            try:
-                post_dataframe = self.extractor.extract(self.sender, self.receiver,
-                    start_time=finish_data['start_time'], end_time=finish_data['end_time'])
-                # modify the dataframe before saving
-                mean_df = pandas.DataFrame(post_dataframe.mean())
-                df_t = mean_df.T
-                df_t['num_workers']= finish_data['num_workers']
-                df_t['num_files']= finish_data['num_files']
-                df_t['blocksize']= self.blocksize
-                df_t['latency']= self.latency
-                self.post_csv = df_t.to_csv(header=True, index=False)
-            except Exception as e:
-                print('Stats error: ' + str(e))
+    def copy_and_wait(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
+        """
+        Similar to copy(), except instead of a nonblocking function that returns a Transfer object 
+        this is a blocking object that waits until the transfer is complete.
+        
+        copy_and_wait() accepts the same arguments as copy().
+        """
+        copydata = self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers,
+            blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats)
+        print(f'Started transfer #{copydata.id}')
 
-            return finish_data
+        finished = False
+        while not finished:
+            time.sleep(30)
+            status = self.status()
+            print(status)
+            if not status:
+                raise Exception("Problem running transfer, empty status from orchestrator")
+            finished = status.get('Unfinished') == 0
+
+        print('Finishing transfer...')
+        time.sleep(5)
+        self.finish()
+        time.sleep(5)
+
+        # get stats and return
+        return self.get(), self.get_stats()
 
 class NVMEConnection(Connection):
     """
@@ -401,9 +446,10 @@ class NVMEConnection(Connection):
             self.receiver_devices = self.receiver.nvmeof_connect(self.sender.data_addr, mountpoint=self.mountpoint)
             print('receiver devices:')
             print(self.receiver_devices)
+            self.receiver_devices.get('devices')
 
         # update mountpoint to real directory (computed in DiskManager.py's mount())
-        remote_devices = [dev for dev in self.receiver_devices.get('devices') if dev.get('transport') == 'tcp']
+        remote_devices = [dev for dev in self.receiver_devices if dev.get('transport') == 'tcp']
         if remote_devices:
             # first remote device
             self.mountpoint = remote_devices[0].get('mounted')
@@ -422,7 +468,8 @@ class NVMEConnection(Connection):
             print('Warning on sender disconnect: ' + str(e))
         self._status = "disconnected"
 
-    def copy(self, sourcefiles, destination):
+    def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False,
+            remote_mount="/remote_nvme/"):
         """
         Copy a list of source files from the sender DTN's remotely mounted NVME drives
         to a destination directory on the receiver DTN.
@@ -430,23 +477,36 @@ class NVMEConnection(Connection):
         if self._status == "disconnected":
             raise Exception("copy after disconnect")
 
-        # find remote mount name from receiver and prepend to source files
-        sourcefiles = [os.path.join(self.mountpoint, srcf) for srcf in sourcefiles]
+        # get files from sender and key them by path for easy lookups
+        read_files = self.sender.files(sourcedir)
+        read_files = {f['name']: f for f in read_files}
+        
+        # full, file-only list
+        complete_source_files = []
+        # also need destination file list, parent dir is not enough
+        complete_destination_files = []
+        # generate a list of destination directories
+        created_dirs = []
+        for index, rf in enumerate(read_files):
+            if limit and index >= limit:
+                break # stop copying
+            if read_files[rf]['type'] == 'file':
+                complete_source_files.append(os.path.join(sourcedir, rf))
+                complete_destination_files.append(os.path.join(destinationdir, rf))
+            elif read_files[rf]['type'] == 'dir':
+                created_dirs.append(os.path.join(destinationdir, rf))
+        
+        # make sure directories exist on receiver
+        self.receiver.create_dirs(created_dirs)
 
-        self.transfer_id = self.orchestrator.transfer(sourcefiles, destination,
-                self.sender.id, self.receiver.id, remote_mount="/remote_nvme/disk1/", tool="dd")
+        # find remote mount name from receiver and prepend to source files
+        #complete_source_files = [os.path.join(self.mountpoint, srcf) for srcf in complete_source_files]
+
+        self.transfer_id = self.orchestrator.transfer(complete_source_files, complete_destination_files,
+                self.sender.id, self.receiver.id, remote_mount=remote_mount, tool="dd",
+                num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy)
         self._status = "copying"
         return self.transfer_id
-
-    def status(self):
-        """
-        Get the transfer data of the current transfer, if finished.
-        """
-        if self._status == "copying":
-            transfer_status = self.orchestrator.get_transfer(self.transfer_id)
-            return transfer_status
-        else:
-            return {"status": self._status}
 
 class DTNOrchestratorClient(object):
     """
@@ -655,7 +715,7 @@ class DTNOrchestratorClient(object):
         """
         # check for transfer status first
         status = self.get_transfer_status(transfer_id)
-        if status.get('Unfinished') == 0:
+        if status and status.get('Unfinished') == 0:
             # get transfer data and clean up if needed
             # TODO don't assume nuttcp as the transfer tool
             if sender and tool:
