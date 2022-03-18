@@ -12,7 +12,7 @@ import itertools
 import concurrent.futures
 import libs.ThreadExecutor
 
-logging.getLogger().setLevel(logging.DEBUG)
+#logging.getLogger().setLevel(logging.DEBUG)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(16)
@@ -47,6 +47,7 @@ class DTN(db.Model):
     data_addr = db.Column(db.String(80), unique=False, nullable=True)
     username = db.Column(db.String(80), unique=False, nullable=True)
     interface = db.Column(db.String(15), unique=False, nullable=True)
+    token = db.Column(db.String(80), unique=False, nullable=True)
 
     def __repr__(self):
         return '<DTN %r>' % self.id
@@ -93,30 +94,35 @@ def init_db():
         #traceback.print_exc()
         abort(make_response(jsonify(message="Unable to add DTN"), 400))        
 
-def transfer_job(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data, timeout=None, retry = 5):
+def transfer_job(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data, timeout=None, retry=5, sender_token=None, receiver_token=None):
     for i in range(0, retry):
-        result = run_transfer(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data)
+        result = run_transfer(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data, sender_token=sender_token, receiver_token=receiver_token)
         result['timeout'] = timeout
         try:
-            end_time = wait_for_transfer(sender, receiver, tool, result)
+            end_time = wait_for_transfer(sender, receiver, tool, result, sender_token=sender_token, receiver_token=receiver_token)
         except TransferException as e:
             time.sleep(1)
             continue
         return result, end_time
     raise Exception('Retry exceeded')
 
-def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool, params):        
+def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool, params, sender_token=None, receiver_token=None):
     global gparams
 
     try:        
         # logging.debug('Running sender')
         ## sender
         params['file'] = srcfile
+        if 'remote_mount' in params and params['remote_mount']:
+            # if we're using 'dd' for NVMEoF, trim off the remote mount directory
+            # since that's only valid on the receiver side
+            params['file'] = params['file'].replace(params['remote_mount'], "")
         params['blocksize'] = gparams['blocksize']
         if srcfile == None and 'duration' not in params:
             abort(make_response(jsonify(message="Need duration for mem-to-mem transfer"), 400))
-        response = requests.post('http://{}/sender/{}'.format(sender_ip, tool), json=params)
-        result = response.json()        
+        response = requests.post('http://{}/sender/{}'.format(sender_ip, tool), json=params,
+            headers=({"Authorization": f"Bearer {sender_token}"} if sender_token else None))
+        result = response.json()
         if response.status_code == 404 and 'message' in result:
             abort(make_response(jsonify(message=result['message']), 404))
         if response.status_code != 200 or result.pop('result') != True:
@@ -124,15 +130,20 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         if srcfile == None:
             result['duration'] = params['duration']
         else:
-            file_size = result['size']            
+            file_size = result['size']
 
         ## receiver
         # logging.debug('Running Receiver')
+        if 'remote_mount' in params and params['remote_mount']:
+            # patch the srcfile path here too, since it got written by the sender
+            result['srcfile'] = os.path.join(params['remote_mount'], params['file'])
+
         result['address'] = sender_data_ip
         result['file'] = dstfile
         result['blocksize'] = gparams['blocksize']
-        
-        response = requests.post('http://{}/receiver/{}'.format(receiver_ip, tool), json=result)
+
+        response = requests.post('http://{}/receiver/{}'.format(receiver_ip, tool), json=result,
+            headers=({"Authorization": f"Bearer {receiver_token}"} if receiver_token else None))
         result = response.json()
         result['dstfile'] = dstfile
         if srcfile != None:
@@ -144,20 +155,22 @@ def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool,
         abort(make_response(jsonify(message="Unable to connect to DTN"), 503))
     return result
 
-def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param):
-
+def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param, sender_token=None, receiver_token=None):
     transfer_param['node'] = 'receiver'    
     port = transfer_param['cport']
-    rcvr_response = requests.get('http://{}/{}/poll'.format(receiver_ip, tool), json=transfer_param)
+    rcvr_response = requests.get('http://{}/{}/poll'.format(receiver_ip, tool), json=transfer_param,
+        headers=({"Authorization": f"Bearer {receiver_token}"} if receiver_token else None))
     if rcvr_response.status_code != 200 or rcvr_response.json()[0] != 0:
-        response = requests.get('http://{}/free_port/{}/{}'.format(sender_ip, tool, port), json=transfer_param)
+        response = requests.get('http://{}/free_port/{}/{}'.format(sender_ip, tool, port), json=transfer_param,
+            headers=({"Authorization": f"Bearer {sender_token}"} if sender_token else None))
         if response.status_code != 200:
             raise Exception('Transfer and sender cleanup failed for port %s' %port)
         raise TransferException('Transfer has failed for port %s' %port)
         #abort(make_response(jsonify(message="Transfer has failed"), 400))
 
     transfer_param['node'] = 'sender'    
-    sndr_response = requests.get('http://{}/{}/poll'.format(sender_ip, tool), json=transfer_param)
+    sndr_response = requests.get('http://{}/{}/poll'.format(sender_ip, tool), json=transfer_param,
+        headers=({"Authorization": f"Bearer {sender_token}"} if sender_token else None))
     if sndr_response.status_code != 200 or sndr_response.json() != 0:
         #abort(make_response(jsonify(message="Transfer has failed"), 400))
         raise Exception('Transfer has failed')
@@ -166,12 +179,18 @@ def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param):
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
     target_DTN = DTN.query.get_or_404(id)
-    return {'id': target_DTN.id, 'name' : target_DTN.name, 'man_addr': target_DTN.man_addr, 'data_addr' : target_DTN.data_addr, 'username' : target_DTN.username, 'interface' : target_DTN.interface}
+    return {'id': target_DTN.id, 'name' : target_DTN.name, 'man_addr': target_DTN.man_addr, 'data_addr' : target_DTN.data_addr,
+            'username' : target_DTN.username, 'interface' : target_DTN.interface, 'jwt_token': target_DTN.token}
+
+@app.route('/DTN/')
+def get_DTNs():
+    dtns = DTN.query.all()
+    return jsonify([{"name": dtn.name, "id": dtn.id, 'man_addr': dtn.man_addr, 'data_addr' : dtn.data_addr, 'username' : dtn.username, 'interface' : dtn.interface} for dtn in dtns])
 
 @app.route('/DTN/',  methods=['POST'])
 def add_DTN():
     data = request.get_json()
-    new_DTN = DTN(name = data['name'], man_addr = data['man_addr'], data_addr = data['data_addr'], username = data['username'], interface = data['interface'])
+    new_DTN = DTN(name = data['name'], man_addr = data['man_addr'], data_addr = data['data_addr'], username = data['username'], interface = data['interface'], token = data['jwt_token'])
     db.session.add(new_DTN)
     try:
         db.session.commit()
@@ -266,11 +285,12 @@ def get_worker_types():
         data[i.id] = i.description
     return jsonify(data)
 
-@app.route('/ping/<int:sender_id>/<int:receiver_id>', methods=['get'])
+@app.route('/ping/<int:sender_id>/<int:receiver_id>', methods=['GET'])
 def get_latency(sender_id, receiver_id):
-    sender = DTN.query.get_or_404(sender_id)    
+    sender = DTN.query.get_or_404(sender_id)
     receiver = DTN.query.get_or_404(receiver_id)
-    response = requests.get('http://{}/ping/{}'.format(sender.man_addr, receiver.data_addr))    
+    response = requests.get('http://{}/ping/{}'.format(sender.man_addr, receiver.data_addr),
+        headers=({"Authorization": request.headers.get('Authorization')} if request.headers.get('Authorization') else None))    
     return response.json()
 
 @app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
@@ -332,8 +352,14 @@ def transfer(tool,sender_id, receiver_id):
     
     executor = libs.ThreadExecutor.ThreadPoolExecutor(max_workers=num_workers)
     
+    # authorization for sender and receiver
+    sender_token = data.get('sender_token')
+    receiver_token = data.get('receiver_token')
+
+    # start transfer job
     future_to_transfer = {
-        executor.submit(transfer_job, sender.man_addr, sender.data_addr, receiver.man_addr, srcfile, dstfile, tool, data, timeout): 
+        executor.submit(transfer_job, sender.man_addr, sender.data_addr, receiver.man_addr, srcfile, dstfile, tool, data,
+            timeout=timeout, sender_token=sender_token, receiver_token=receiver_token): 
         (srcfile,dstfile) for srcfile,dstfile in zip(srcfiles, dstfiles)
         }
     thread_executor_pools[new_transfer.id] = [executor, future_to_transfer]
@@ -379,7 +405,6 @@ def wait(transfer_id):
 
 @app.route('/check/<int:transfer_id>', methods=['GET'])
 def check(transfer_id):    
-
     global last_sizes
     if transfer_id not in thread_executor_pools:
         return {'Unfinished' : 0}
@@ -390,7 +415,7 @@ def check(transfer_id):
     for transfer in thread_executor_pools[transfer_id][1]:
         if not transfer.done(): continue
         result, _ = transfer.result()
-        curr_size += result['size']    
+        curr_size += result.get('size', 0)
     last_t, last_size = last_sizes[transfer_id]
     last_sizes[transfer_id] = (datetime.datetime.utcnow(), curr_size)
     throughput = (curr_size - last_size) / (datetime.datetime.utcnow() - last_t).seconds
