@@ -21,15 +21,15 @@ Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
 #  This hardcoded/static map is needed since Prometheus jobs are different from
 #  the actual hostnames and registered DTN names.
 PROMETHEUS_JOBS = {
-    "138.44.15.78:5001": "aarnet01",
-    "74.114.96.98:5000": "starlight01",
-    "109.171.131.68:5000": "kaust01",
-    "210.119.23.12:5000": "kisti01",
-    "145.146.1.10:5000": "uva01",
-    "213.135.51.226:5000": "icm01",
-    "193.166.254.54:5000": "csc01",
-    "193.166.254.50:5000": "csc02",
-    "103.72.192.66:5001": "nscc01"
+    "138.44.15.78": "aarnet01",
+    "74.114.96.98": "starlight01",
+    "109.171.131.68": "kaust01",
+    "210.119.23.12": "kisti01",
+    "145.146.1.10:": "uva01",
+    "213.135.51.226": "icm01",
+    "193.166.254.54": "csc01",
+    "193.166.254.50": "csc02",
+    "103.72.192.66": "nscc01"
 }
 
 class DTN(object):
@@ -209,6 +209,9 @@ class StatsExtractor(object):
 
         # monitor address = management address with a different port (default 9100)
         sender_mon_addr = sender.man_addr.split(':')[0] + ":9100"
+        # special case for starlight - it has a different exporter address
+        if sender.name == 'dtn098.sl.startap.net':
+            sender_mon_addr = '165.124.33.174:9100'
         receiver_mon_addr = receiver.man_addr.split(':')[0] + ":9100"
         
         STEP = 15
@@ -227,10 +230,15 @@ class StatsExtractor(object):
         'or label_replace(sum by (job)(irate(node_netstat_Tcp_RetransSegs{{instance=~"{4}.*"}}[{1}m])), "Packet_losses", "$0", "job", "(.+)") '
         'or label_replace(avg by (job)((node_hwmon_temp_celsius{{instance=~"{4}.*"}})), "CPU_temp", "$0", "job", "(.+)") '
         'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="{5}"}}), "CPU_number", "$0", "job", "(.+)") '
-        '').format(sender.name, AVG_INT, sender.interface, 'dtnaas', sender_mon_addr, receiver_mon_addr, PROMETHEUS_JOBS.get(sender.man_addr))
+        '').format(sender.name, AVG_INT, sender.interface, 'dtnaas', sender_mon_addr, receiver_mon_addr, PROMETHEUS_JOBS.get(sender.man_addr.split(':')[0]))
         dataset = None
+
+        # hacky fix for kisti-starlight connections
+        if "210.119.23.12" in sender.man_addr:
+            query = query.replace(f'transmit_bytes_total{{instance=~"{sender_mon_addr}.*", device="{sender.interface}"',
+                    f'receive_bytes_total{{job=~"{PROMETHEUS_JOBS.get(receiver.man_addr.split(":")[0])}", device="{receiver.interface}"')
         
-        while end_time > start_time:        
+        while end_time > start_time:
             data_in_period = None
             max_ts = start_time + (STEP * MAX_RES) 
             next_hop_ts = end_time if max_ts > end_time else max_ts
@@ -254,6 +262,8 @@ class StatsExtractor(object):
         cols = dataset.columns.tolist()
         labels_to_rearrange = ['NVMe_total_util', 'NVMe_transfer_bytes']    
         for i in labels_to_rearrange:
+            if i not in cols:
+                continue
             cols.remove(i)
             cols.insert(0,i)
 
@@ -346,6 +356,31 @@ class Connection(object):
                 num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy)
         self._status = "copy initiated"
         return Transfer(self.transfer_id, complete_source_files, complete_destination_files)
+
+    def memtest(self, duration=60, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
+        """
+        Run a memory-to-memory test between the DTNs. This accepts a duration in seconds.
+        """
+        try:
+            # get latency and blocksize for metrics later
+            self.latency = self.orchestrator.ping(self.sender, self.receiver).get('latency')
+            self.blocksize = blocksize
+
+            pre_dataframe = self.extractor.extract(self.sender, self.receiver)
+            self.pre_csv = pre_dataframe.to_csv(header=True, index=False)
+        except Exception as e:
+            print('Stats error: ' + str(e))
+            if require_stats:
+                raise e
+
+        # need at least one "file" per worker
+        fakefiles = [None for i in range(num_workers)]
+
+        self.transfer_id = self.orchestrator.transfer(fakefiles, fakefiles,
+                self.sender.id, self.receiver.id, tool=self.tool,
+                num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, duration=duration)
+        self._status = "memtest initiated"
+        return Transfer(self.transfer_id, fakefiles, fakefiles)
 
     def status(self):
         """
@@ -499,8 +534,15 @@ class NVMEConnection(Connection):
         # make sure directories exist on receiver
         self.receiver.create_dirs(created_dirs)
 
-        # find remote mount name from receiver and prepend to source files
-        #complete_source_files = [os.path.join(self.mountpoint, srcf) for srcf in complete_source_files]
+        try:
+            # get latency and blocksize for metrics later
+            self.latency = self.orchestrator.ping(self.sender, self.receiver).get('latency')
+            self.blocksize = blocksize
+
+            pre_dataframe = self.extractor.extract(self.sender, self.receiver)
+            self.pre_csv = pre_dataframe.to_csv(header=True, index=False)
+        except Exception as e:
+            print('Stats error: ' + str(e))
 
         self.transfer_id = self.orchestrator.transfer(complete_source_files, complete_destination_files,
                 self.sender.id, self.receiver.id, remote_mount=remote_mount, tool="dd",
@@ -752,7 +794,8 @@ class DTNOrchestratorClient(object):
         else:
             raise Exception(f"Error {result.status_code} running ping from {sender.name}")
 
-    def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, num_workers=1, blocksize=8192, zerocopy=False):
+    def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, 
+            num_workers=1, blocksize=8192, zerocopy=False, duration=None):
         """
         Initiate a transfer between two DTNs with specific lists of files.
 
@@ -781,7 +824,8 @@ class DTNOrchestratorClient(object):
             "remote_mount": remote_mount,
             "num_workers": num_workers,
             "blocksize": blocksize,
-            "zerocopy": zerocopy
+            "zerocopy": zerocopy,
+            "duration": duration
         })
         if result.status_code == 200:
             # get the transfer ID and start waiting

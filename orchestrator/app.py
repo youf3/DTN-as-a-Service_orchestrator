@@ -12,7 +12,7 @@ import itertools
 import concurrent.futures
 import libs.ThreadExecutor
 
-logging.getLogger().setLevel(logging.DEBUG)
+#logging.getLogger().setLevel(logging.DEBUG)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(16)
@@ -415,7 +415,7 @@ def check(transfer_id):
     for transfer in thread_executor_pools[transfer_id][1]:
         if not transfer.done(): continue
         result, _ = transfer.result()
-        curr_size += result['size']    
+        curr_size += result.get('size', 0)
     last_t, last_size = last_sizes[transfer_id]
     last_sizes[transfer_id] = (datetime.datetime.utcnow(), curr_size)
     throughput = (curr_size - last_size) / (datetime.datetime.utcnow() - last_t).seconds
