@@ -1,8 +1,13 @@
-FROM python:3.6.10-slim
+FROM python:3.9-slim
 
-COPY . /orchestrator
+WORKDIR /orchestrator
+
+COPY ./requirements.txt /orchestrator/requirements.txt
 
 RUN pip install -r /orchestrator/requirements.txt
 
-ENTRYPOINT [ "python"]
-CMD ["orchestrator/app.py"]
+COPY . /orchestrator
+
+EXPOSE 5001
+
+ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:5001", "--log-level", "info", "app:app"]

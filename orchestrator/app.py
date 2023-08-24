@@ -4,7 +4,7 @@ import os
 import time
 from flask import Flask, request, jsonify, abort, make_response, json#, session
 from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
+from flask_migrate import Migrate, upgrade
 import sqlalchemy
 import logging
 import traceback
@@ -12,11 +12,12 @@ import itertools
 import concurrent.futures
 import libs.ThreadExecutor
 
-#logging.getLogger().setLevel(logging.DEBUG)
+from libs.Schemes import NumaScheme
+logging.getLogger().setLevel(logging.DEBUG)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(16)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db/dtn.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.getcwd()}/db/dtn.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
@@ -24,14 +25,6 @@ thread_executor_pools = {}
 last_sizes = {}
 
 gparams = {'blocksize' : 64}
-
-with app.app_context():
-    if db.engine.url.drivername == 'sqlite':
-        migrate.init_app(app, db, render_as_batch=True)
-    else:
-        migrate.init_app(app, db)
-    from flask_migrate import upgrade as _upgrade
-    #_upgrade(directory='orchestrator/migrations')
 
 class TransferException(Exception):
     def __init__(self, msg):
@@ -41,6 +34,7 @@ class TransferException(Exception):
         return self.msg
 
 class DTN(db.Model):
+    __tablename__ = 'DTN'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(15), unique=False, nullable=True)
     man_addr = db.Column(db.String(80), unique=False, nullable=True)
@@ -51,6 +45,14 @@ class DTN(db.Model):
 
     def __repr__(self):
         return '<DTN %r>' % self.id
+
+class WorkerType(db.Model):
+    __tablename__ = 'WorkerType'
+    id = db.Column(db.Integer, primary_key=True)
+    description = db.Column(db.String(80), unique=False, nullable=True)
+
+    def __repr__(self):
+        return '<WorkerType %r>' % self.description
 
 class Transfer(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -68,31 +70,29 @@ class Transfer(db.Model):
     def __repr__(self):
         return '<Transfer %r>' % self.id
 
-class WorkerType(db.Model):
-    __tablename__ = 'WorkerType'
-    id = db.Column(db.Integer, primary_key=True)
-    description = db.Column(db.String(80), unique=False, nullable=True)
-
-    def __repr__(self):
-        return '<WorkerType %r>' % self.description
-
-db.create_all()
-
 def init_db():
-    from libs.Schemes import NumaScheme    
-    worker_types = {i.name:i.value for i in NumaScheme}
-    wtypes = WorkerType.query.all()
+    with app.app_context():
+        if db.engine.url.drivername == 'sqlite':
+            migrate.init_app(app, db, render_as_batch=True)
+        else:
+            migrate.init_app(app, db)
+        #upgrade(directory='orchestrator/migrations')
 
-    for k,v in worker_types.items():
-        if k not in [i.description for i in wtypes]:
-            wtype = WorkerType(id=v, description=k)
-            db.session.add(wtype)
+        db.create_all()
 
-    try:
-        db.session.commit()
-    except sqlalchemy.exc.IntegrityError:
-        #traceback.print_exc()
-        abort(make_response(jsonify(message="Unable to add DTN"), 400))        
+        wtypes = WorkerType.query.all()
+        worker_types = {i.name:i.value for i in NumaScheme}
+
+        for k,v in worker_types.items():
+            if k not in [i.description for i in wtypes]:
+                wtype = WorkerType(id=v, description=k)
+                db.session.add(wtype)
+
+        try:
+            db.session.commit()
+        except sqlalchemy.exc.IntegrityError:
+            #traceback.print_exc()
+            abort(make_response(jsonify(message="Unable to add DTN"), 400))
 
 def transfer_job(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data, timeout=None, retry=5, sender_token=None, receiver_token=None):
     for i in range(0, retry):
@@ -457,7 +457,7 @@ def scale_transfer(transfer_id):
 
     return ''
 
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     app.run('0.0.0.0')
-    pass

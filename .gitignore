@@ -1,2 +1,3 @@
 .vscode/
+orchestrator/db/
 **/__pycache__

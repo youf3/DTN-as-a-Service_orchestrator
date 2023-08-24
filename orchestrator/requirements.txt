@@ -2,4 +2,5 @@ flask
 flask_sqlalchemy
 flask-migrate
 flask-testing
+gunicorn
 requests
