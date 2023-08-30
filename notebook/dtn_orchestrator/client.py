@@ -43,7 +43,7 @@ class DTN(object):
     def __init__(self, client, dtndata):
         self._client = client
         if 'id' not in dtndata.keys():
-            raise ValueError("ID not given in DTN object")
+            raise ValueError("ID not given in DTN object") from None
         # just use the scheme in the returned JSON - defined in orchestrator app.py
         for key in dtndata:
             if '.' not in key and '__' not in key:
@@ -51,9 +51,25 @@ class DTN(object):
 
     def __str__(self):
         try:
-            return f"{self.id}: {self.name} ({self.man_addr})"
+            _str = f"{self.id}: {self.name}"
+            if hasattr(self, "man_addr"):
+                _str += f" (M: {self.man_addr})"
+            if hasattr(self, "data_addr"):
+                _str += f" (D: {self.data_addr})"
+            return _str
         except:
             return str(self.id if hasattr(self, "id") else 0)
+    
+    def __repr__(self):
+        try:
+            _str = f"DTN {self.id}: {self.name}"
+            if hasattr(self, "man_addr"):
+                _str += f" (M: {self.man_addr})"
+            if hasattr(self, "data_addr"):
+                _str += f" (D: {self.data_addr})"
+            return _str
+        except:
+            return "DTN " + str(self.id if hasattr(self, "id") else 0)
 
     def _token_header(self):
         if hasattr(self, 'jwt_token') and self.jwt_token:
@@ -84,7 +100,7 @@ class DTN(object):
         """
         mkdir_result = requests.post(f"http://{self.man_addr}/create_dir/", headers=self._token_header(), json=dirlist)
         if mkdir_result.status_code != 200:
-            raise Exception(f"Error creating directories, code {mkdir_result.status_code} ({mkdir_result.text})")
+            raise Exception(f"Error creating directories, code {mkdir_result.status_code} ({mkdir_result.text})") from None
 
     def ping(self, remote_id):
         """
@@ -102,7 +118,7 @@ class DTN(object):
         """
         result = requests.get(f"http://{self.man_addr}/nvme/devices", headers=self._token_header())
         if result.status_code != 200:
-            raise Exception(f"Error retrieving NVMEoF data")
+            raise Exception(f"Error retrieving NVMEoF data") from None
         return result.json()
 
     def nvmeof_setup(self):
@@ -115,7 +131,7 @@ class DTN(object):
             'numa': 0 # FIXME
         })
         if result.status_code != 200:
-            raise Exception(f"Error setting up NVMEoF, code {result.status_code}: {result.text}")
+            raise Exception(f"Error setting up NVMEoF, code {result.status_code}: {result.text}") from None
         return result.json()
 
     def nvmeof_stop(self):
@@ -127,7 +143,7 @@ class DTN(object):
             'numa': 0 # FIXME
         })
         if result.status_code != 200:
-            raise Exception(f"Error stopping NVMEoF, code {result.status_code}: {result.text}")
+            raise Exception(f"Error stopping NVMEoF, code {result.status_code}: {result.text}") from None
         return
 
     def nvmeof_connect(self, remote_addr, mountpoint="/remote_nvme"):
@@ -143,7 +159,7 @@ class DTN(object):
             'num_disk': 1 # FIXME read from sender side
         })
         if result.status_code != 200:
-            raise Exception(f"Error connecting NVMEoF, code {result.status_code}: {result.text}")
+            raise Exception(f"Error connecting NVMEoF, code {result.status_code}: {result.text}") from None
         return result.json()
     
     def nvmeof_disconnect(self, remote_addr):
@@ -154,7 +170,7 @@ class DTN(object):
             'remote_addr': remote_addr,
         })
         if result.status_code != 200:
-            raise Exception(f"Error connecting NVMEoF, code {result.status_code}: {result.text}")
+            raise Exception(f"Error connecting NVMEoF, code {result.status_code}: {result.text}") from None
         return
 
     def get(self, url, **kwargs):
@@ -188,7 +204,7 @@ class StatsExtractor(object):
         metrics_to_remove = ['instance', 'job', 'mode', '__name__', 'container', 'endpoint', 'namespace', 'pod', 'prometheus', 'service']
         for i in metrics_to_remove:
             if i in metric: del metric[i]
-        if len(metric) > 1 : raise Exception('too many metric labels')
+        if len(metric) > 1 : raise Exception('too many metric labels') from None
         else:
             return next(iter(metric.keys()))
 
@@ -554,7 +570,7 @@ class DTNOrchestratorClient(object):
     """
     Client wrapper for the DTN Orchestrator.
     """
-    def __init__(self, host="orchestrator", port=5000):
+    def __init__(self, host="orchestrator", port=5001):
         self.base_url = f"http://{host}:{port}/"
     
     def _id2dtn(self, id_or_dtn):
@@ -573,7 +589,7 @@ class DTNOrchestratorClient(object):
         if result.status_code == 200:
             return "OK"
         else:
-            raise Exception(result.text)
+            raise Exception(result.text) from None
 
     def list_dtns(self):
         """
@@ -593,10 +609,9 @@ class DTNOrchestratorClient(object):
         """
         try:
             result = requests.get(self.base_url + f"DTN/{id}")
-            # TODO error checking
             dtn = DTN(self, result.json())
         except json.JSONDecodeError:
-            raise ValueError(f"DTN ID {id} not found on orchestrator")
+            raise ValueError(f"DTN ID {id} not found on orchestrator") from None
         return dtn
 
     def add_dtn(self, name, management_addr, data_addr, username, interface, jwt_token=""):
@@ -615,7 +630,7 @@ class DTNOrchestratorClient(object):
         # before adding, check for an existing one (identical name & mgmt addr)
         dtnlist = self.list_dtns()
         for dtn in dtnlist:
-            if name == dtn.name and management_addr in dtn.man_addr:
+            if name == dtn.name and management_addr in dtn.man_addr and data_addr in dtn.data_addr:
                 print('Found existing DTN registered')
                 return dtn
 
@@ -633,7 +648,7 @@ class DTNOrchestratorClient(object):
             raise Exception(result.text)
         return self.get_dtn(result.json()['id'])
 
-    def register_dtn(self, address, data_addr=None, interface=None):
+    def register_dtn(self, address, port=5000, data_addr=None, interface=None):
         """
         Auto register a DTN. Unlike add_dtn(), this requires the DTN to be accessible
         and to have the iCAIR DTN agent running.
@@ -648,7 +663,7 @@ class DTNOrchestratorClient(object):
 
         :returns: A DTN object with the created DTN data.
         """
-        result = requests.post(f"http://{address}/register", json={
+        result = requests.post(f"http://{address}:{port}/register", json={
             "address": address,
             "data_addr": data_addr,
             "interface": interface,
@@ -657,7 +672,7 @@ class DTNOrchestratorClient(object):
             print(f"Error {result.status_code}")
             raise Exception(result.text)
         dtn_data = result.json()
-        return self.add_dtn(dtn_data["name"], dtn_data["man_addr"], 
+        return self.add_dtn(dtn_data["name"], f'{dtn_data["man_addr"]}:{port}',
             dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"],
             jwt_token=dtn_data.get("jwt_token", ""))
 
@@ -709,8 +724,10 @@ class DTNOrchestratorClient(object):
         Get a list of running transfers from the orchestrator.
         """
         result = requests.get(self.base_url + "running")
-        # TODO error checking
-        return result.json()
+        try:
+            return result.json()
+        except json.JSONDecodeError:
+            raise ValueError("No transfers recorded") from None
 
     def get_transfer(self, id):
         """
@@ -722,7 +739,8 @@ class DTNOrchestratorClient(object):
         """
         # TODO permissions checking
         result = requests.get(self.base_url + f"transfer/{id}")
-        # TODO error checking
+        if result.status_code == 404:
+            raise ValueError("Transfer not found")
         return result.json()
     
     def get_transfer_status(self, id):
@@ -768,7 +786,7 @@ class DTNOrchestratorClient(object):
             if wait_data.status_code == 200:
                 return wait_data.json()
             else:
-                raise Exception(f"Error finishing transfer, code {wait_data.status_code}: {str(wait_data.text)}")
+                raise Exception(f"Error finishing transfer, code {wait_data.status_code}: {str(wait_data.text)}") from None
         else:
             return status
 
@@ -786,13 +804,12 @@ class DTNOrchestratorClient(object):
         receiver = self._id2dtn(receiver)
         # TODO permissions checking
         result = requests.get(self.base_url + f"ping/{sender.id}/{receiver.id}", headers=sender._token_header())
-        # TODO error checking
         if result.status_code == 401:
-            raise Exception("Not authorized (DTN not registered?)")
+            raise Exception("Not authorized (DTN not registered?)") from None
         if result.status_code == 200:
             return result.json()
         else:
-            raise Exception(f"Error {result.status_code} running ping from {sender.name}")
+            raise Exception(f"Error {result.status_code} running ping from {sender.name}") from None
 
     def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, 
             num_workers=1, blocksize=8192, zerocopy=False, duration=None):
@@ -832,4 +849,4 @@ class DTNOrchestratorClient(object):
             transfer_id = result.json().get("transfer")
             return transfer_id
         else:
-            raise Exception(f"Error starting transfer: {str(result.json)}")
+            raise Exception(f"Error starting transfer: {str(result.json)}") from None
