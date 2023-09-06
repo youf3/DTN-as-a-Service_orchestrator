@@ -12,7 +12,7 @@ import jwt
 import time
 import pandas
 from prometheus_http_client import Prometheus
-from http.client import HTTPException
+from http.client import HTTPException, RemoteDisconnected
 from collections import namedtuple
 
 Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
@@ -71,10 +71,23 @@ class DTN(object):
         except:
             return "DTN " + str(self.id if hasattr(self, "id") else 0)
 
+    def __eq__(self, other):
+        # don't compare ID! they may be functionally the same, but on different clients
+        return (
+                self.name == other.name
+                and (hasattr(self, 'man_addr') and hasattr(other, 'man_addr') and self.man_addr == other.man_addr)
+                and (hasattr(self, 'data_addr') and hasattr(other, 'data_addr') and self.data_addr == other.data_addr)
+                and (hasattr(self, 'jwt_token') and hasattr(other, 'jwt_token') and self.jwt_token == other.jwt_token))
+
     def _token_header(self):
         if hasattr(self, 'jwt_token') and self.jwt_token:
             encoded_data = {'sub': getpass.getuser()}
             return {"Authorization": f"Bearer {jwt.encode(encoded_data, self.jwt_token, 'HS256')}"}
+
+    def get_jwt(self):
+        if hasattr(self, 'jwt_token') and self.jwt_token:
+            encoded_data = {'sub': getpass.getuser()}
+            return jwt.encode(encoded_data, self.jwt_token, 'HS256')
 
     def files(self, filedir=None):
         """
@@ -440,9 +453,12 @@ class Connection(object):
         (dependent on the tool used for the transfer)
         """
         if self.transfer_id:
-            return self.orchestrator.finish_transfer(self.transfer_id,
+            result = self.orchestrator.finish_transfer(self.transfer_id,
                     sender=(self.sender if cleanup else None),
                     tool=(self.tool if cleanup else None))
+            if result.get('result') and 'failed' in result.keys():
+                self._status = f"Copy finished with {len(result['failed'])} failures"
+            return result
 
     def copy_and_wait(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
         """
@@ -663,18 +679,21 @@ class DTNOrchestratorClient(object):
 
         :returns: A DTN object with the created DTN data.
         """
-        result = requests.post(f"http://{address}:{port}/register", json={
-            "address": address,
-            "data_addr": data_addr,
-            "interface": interface,
-        })
-        if result.status_code != 200:
-            print(f"Error {result.status_code}")
-            raise Exception(result.text)
-        dtn_data = result.json()
-        return self.add_dtn(dtn_data["name"], f'{dtn_data["man_addr"]}:{port}',
-            dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"],
-            jwt_token=dtn_data.get("jwt_token", ""))
+        try:
+            result = requests.post(f"http://{address}:{port}/register", json={
+                "address": address,
+                "data_addr": data_addr,
+                "interface": interface,
+            })
+            if result.status_code != 200:
+                print(f"Error {result.status_code}")
+                raise Exception(result.text)
+            dtn_data = result.json()
+            return self.add_dtn(dtn_data["name"], f'{dtn_data["man_addr"]}:{port}',
+                dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"],
+                jwt_token=dtn_data.get("jwt_token", ""))
+        except TimeoutError:
+            raise TimeoutError("Connection timed out to DTN agent") from None
 
     def delete_dtn(self, dtn):
         """
@@ -803,13 +822,16 @@ class DTNOrchestratorClient(object):
         sender = self._id2dtn(sender)
         receiver = self._id2dtn(receiver)
         # TODO permissions checking
-        result = requests.get(self.base_url + f"ping/{sender.id}/{receiver.id}", headers=sender._token_header())
-        if result.status_code == 401:
-            raise Exception("Not authorized (DTN not registered?)") from None
-        if result.status_code == 200:
-            return result.json()
-        else:
-            raise Exception(f"Error {result.status_code} running ping from {sender.name}") from None
+        try:
+            result = requests.get(self.base_url + f"ping/{sender.id}/{receiver.id}", headers=sender._token_header())
+            if result.status_code == 401:
+                raise Exception("Not authorized (DTN not registered?)") from None
+            if result.status_code == 200:
+                return result.json()
+            else:
+                raise Exception(f"Error {result.status_code} running ping from {sender.name}") from None
+        except RemoteDisconnected:
+            raise Exception("Orchestrator worker timed out") from None
 
     def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, 
             num_workers=1, blocksize=8192, zerocopy=False, duration=None):
@@ -836,8 +858,8 @@ class DTNOrchestratorClient(object):
             "srcfile": sourcefiles,
             "dstfile": destfiles,
             # sender/receiver auth
-            "sender_token": sender.jwt_token,
-            "receiver_token": receiver.jwt_token,
+            "sender_token": sender.get_jwt(),
+            "receiver_token": receiver.get_jwt(),
             "remote_mount": remote_mount,
             "num_workers": num_workers,
             "blocksize": blocksize,
