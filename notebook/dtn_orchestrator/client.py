@@ -14,6 +14,9 @@ import pandas
 from prometheus_http_client import Prometheus
 from http.client import HTTPException
 from collections import namedtuple
+from functools import reduce
+from operator import and_
+from typing import Union
 
 Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
 
@@ -92,6 +95,30 @@ class DTN(object):
         else:
             raise Exception(result.text)
     
+    def get_files(
+        self,
+        directory: str = None,
+        return_df: bool = False,
+        verbose: bool = False,
+    ) -> Union[tuple[filter, filter], pandas.DataFrame]:
+        """
+        Returns directories and files relative to <directory>
+        """
+        res = requests.get(f"http://{self.man_addr}/files/{directory}", headers=self._token_header())
+        if verbose:
+            print(res)
+        res_json = res.json()
+
+        directories = filter(lambda x: x["type"] == "dir", res_json)
+        files = filter(lambda x: x["type"] == "file", res_json)
+
+        if return_df:
+            directories_df = pandas.DataFrame(directories)
+            files_df = pandas.DataFrame(files)
+            return directories_df, files_df
+
+        return directories, files
+
     def create_dirs(self, dirlist):
         """
         Create a directory on the DTN.
@@ -236,17 +263,26 @@ class StatsExtractor(object):
         query = (
         'label_replace(sum by (instance)(irate(node_network_transmit_bytes_total{{instance=~"{4}.*", device="{2}"}}[{1}m])), "network_throughput", "$0", "instance", "(.+)") '
         'or label_replace(sum by (job)(irate(node_disk_written_bytes_total{{instance=~"{5}.*", device=~"nvme.*"}}[{1}m])),"Goodput", "$0", "job", "(.+)") '
-        'or label_replace(sum by (job)(1 - irate(node_cpu_seconds_total{{mode="idle", instance="{4}"}}[1m])),"CPU", "$0", "job", "(.+)") '
-        'or label_replace(max by (container)(container_memory_working_set_bytes{{namespace="{3}", container=~"{0}.*"}}), "Memory_used", "$0", "container", "(.+)") '
-        'or label_replace(node_memory_Active_bytes{{instance="{4}"}}, "Memory_used", "$0", "instance", "(.+)") '
-        'or label_replace(sum by (job)(irate(node_disk_read_bytes_total{{instance=~"{4}.*", device=~"nvme.*"}}[{1}m])),"NVMe_transfer_bytes", "$0", "job", "(.+)") '
-        'or label_replace(sum by (job)(irate(node_disk_io_time_seconds_total{{instance=~"{4}.*", device=~"nvme.*"}}[{1}m])),"NVMe_total_util", "$0", "job", "(.+)") '
-        'or label_replace(count by (job)(node_disk_io_time_seconds_total{{instance=~"{4}.*", device=~"nvme[0-7]n1"}}),"Storage_count", "$0", "job", "(.+)") '
-        'or label_replace(sum by (job)(node_network_speed_bytes{{instance=~"{4}.*", device="{2}"}} * 8), "NIC_speed", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(1 - irate(node_cpu_seconds_total{{mode="idle", instance="{4}"}}[1m])),"Sender_CPU_Utils", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(1 - irate(node_cpu_seconds_total{{mode="idle", instance="{5}"}}[1m])),"Receiver_CPU_Utils", "$0", "job", "(.+)") '
+        'or label_replace(max by (container)(container_memory_working_set_bytes{{namespace="{3}", container=~"{0}.*"}}), "Container_Memory_used", "$0", "container", "(.+)") '
+        'or label_replace(node_memory_Active_bytes{{instance="{4}"}}, "Sender_Memory_used", "$0", "instance", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_read_bytes_total{{instance=~"{4}.*", device=~"nvme.*"}}[{1}m])),"Sender_NVMe_transfer_bytes", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_io_time_seconds_total{{instance=~"{4}.*", device=~"nvme.*"}}[{1}m])),"Sender_NVMe_total_util", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_io_time_seconds_total{{instance=~"{5}.*", device=~"nvme.*"}}[{1}m])),"Receiver_NVMe_total_util", "$0", "job", "(.+)") '
+        'or label_replace(count by (job)(node_disk_io_time_seconds_total{{instance=~"{4}.*", device=~"nvme.*"}}),"Sender_Storage_count", "$0", "job", "(.+)") '
+        'or label_replace(count by (job)(node_disk_io_time_seconds_total{{instance=~"{5}.*", device=~"nvme.*"}}),"Receiver_Storage_count", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(node_network_speed_bytes{{instance=~"{4}.*", device="{2}"}} * 8), "Sender_NIC_speed", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(node_network_speed_bytes{{instance=~"{5}.*", device="{8}"}} * 8), "Receiver_NIC_speed", "$0", "job", "(.+)") '
         'or label_replace(sum by (job)(irate(node_netstat_Tcp_RetransSegs{{instance=~"{4}.*"}}[{1}m])), "Packet_losses", "$0", "job", "(.+)") '
-        'or label_replace(avg by (job)((node_hwmon_temp_celsius{{instance=~"{4}.*"}})), "CPU_temp", "$0", "job", "(.+)") '
-        'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="{5}"}}), "CPU_number", "$0", "job", "(.+)") '
-        '').format(sender.name, AVG_INT, sender.interface, 'dtnaas', sender_mon_addr, receiver_mon_addr, PROMETHEUS_JOBS.get(sender.man_addr.split(':')[0]))
+        'or label_replace(avg by (job)((node_hwmon_temp_celsius{{instance=~"{4}.*"}})), "Sender_CPU_temp", "$0", "job", "(.+)") '
+        'or label_replace(avg by (job)((node_hwmon_temp_celsius{{instance=~"{5}.*"}})), "Receiver_CPU_temp", "$0", "job", "(.+)") '
+        'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="{4}"}}), "Sender_CPU_number", "$0", "job", "(.+)") '
+        'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="{5}"}}), "Receiver_CPU_number", "$0", "job", "(.+)") '
+        'or label_replace(avg(irate(node_cpu_seconds_total{{mode="iowait", instance="{4}"}}[{1}m])),"Sender_CPU_IO_wait_util", "$0", "job", "(.+)") '
+        'or label_replace(avg(irate(node_cpu_seconds_total{{mode="iowait", instance="{5}"}}[{1}m])),"Receiver_CPU_IO_wait_util", "$0", "job", "(.+)") '
+        'or label_replace(avg(irate(node_disk_io_time_weighted_seconds_total{{instance="{5}"}}[{1}m])),"Receiver_Disk_IO_time_Weighted", "$0", "job", "(.+)") '
+        '').format(sender.name, AVG_INT, sender.interface, 'dtnaas', sender_mon_addr, receiver_mon_addr, PROMETHEUS_JOBS.get(sender.man_addr.split(':')[0]), receiver.name, receiver.interface)
         dataset = None
 
         # hacky fix for kisti-starlight connections
@@ -373,6 +409,49 @@ class Connection(object):
         self._status = "copy initiated"
         return Transfer(self.transfer_id, complete_source_files, complete_destination_files)
 
+    def copy_with_file_size(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, min_size=None, max_size=None):
+            
+            if self._status == "disconnected":
+                raise Exception("copy after disconnect")
+
+            # get files from sender and key them by path for easy lookups
+            directories_df, files_df = self.sender.get_files(directory=sourcedir, return_df=True)
+            des_dir = directories_df["name"]
+            files_df["FILE_SIZE (MB)"] = files_df["size"] / 1024**2
+            masks = [
+                [True] * len(files_df),
+                files_df["FILE_SIZE (MB)"] >= min_size,
+                files_df["FILE_SIZE (MB)"] <= max_size,
+            ]
+            transfer_files_df = files_df[reduce(and_, masks)]
+            transfer_files_df = transfer_files_df.sort_values(by=['size'], ascending=False)
+            transfer_filenames = transfer_files_df["name"]
+            src_files = [os.path.join(sourcedir, filename) for filename in transfer_filenames]
+            dst_files = [os.path.join(destinationdir, filename) for filename in transfer_filenames]
+            dirs = [os.path.join(destinationdir, i) for i in des_dir]
+            
+            # make sure directories exist on receiver
+            self.receiver.create_dirs(dirs)
+            
+            try:
+                # get latency and blocksize for metrics later
+                self.latency = self.orchestrator.ping(self.sender, self.receiver).get('latency')
+                self.blocksize = blocksize
+
+                pre_dataframe = self.extractor.extract(self.sender, self.receiver)
+                self.pre_csv = pre_dataframe.to_csv(header=True, index=False)
+            except Exception as e:
+                print('Stats error: ' + str(e))
+                if require_stats:
+                    raise e
+
+            self.transfer_id = self.orchestrator.transfer(src_files, dst_files,
+                    self.sender.id, self.receiver.id, tool=self.tool,
+                    num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy)
+            self._status = "copy initiated"
+            print(f'file number:{len(transfer_files_df.index)}')
+            return Transfer(self.transfer_id, src_files, dst_files)
+
     def memtest(self, duration=60, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
         """
         Run a memory-to-memory test between the DTNs. This accepts a duration in seconds.
@@ -412,7 +491,7 @@ class Connection(object):
         if self.transfer_id:
             return self.orchestrator.get_transfer(self.transfer_id)
 
-    def get_stats(self):
+    def get_stats(self, filename):
         """
         Collect transfer statistics from Prometheus.
         """
@@ -426,9 +505,15 @@ class Connection(object):
         df_t['num_files']= finish_data['num_files']
         df_t['blocksize']= self.blocksize
         df_t['latency']= self.latency
-        self.post_csv = df_t.to_csv(header=True, index=False)
+        df_t['start_time'] = finish_data['start_time']
+        df_t['end_time'] = finish_data['end_time']
+        
+        if not os.path.exists(filename):
+            df_t.to_csv(filename, index=False)
+        else:
+            df_t.to_csv(filename, index=False, header=False, mode="a")
 
-        return self.post_csv
+        return df_t
 
     def finish(self, cleanup=False):
         """
@@ -444,16 +529,19 @@ class Connection(object):
                     sender=(self.sender if cleanup else None),
                     tool=(self.tool if cleanup else None))
 
-    def copy_and_wait(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
+    def copy_and_wait(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, min_size=None, max_size=None):
         """
         Similar to copy(), except instead of a nonblocking function that returns a Transfer object 
         this is a blocking object that waits until the transfer is complete.
         
         copy_and_wait() accepts the same arguments as copy().
         """
-        copydata = self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers,
-            blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats)
-        print(f'Started transfer #{copydata.id}')
+        if (min_size == None or max_size == None):
+            copydata = self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers,
+                blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats)
+        else:
+            copydata = self.copy_with_file_size(sourcedir, destinationdir, limit=limit, num_workers=num_workers,
+                blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats, min_size=min_size, max_size=max_size)
 
         finished = False
         while not finished:
@@ -470,6 +558,12 @@ class Connection(object):
         time.sleep(5)
 
         # get stats and return
+        return self.get(), self.get_stats()
+
+    def change_current_trans(self,num_workers,blocksize):
+        
+        self.orchestrator.scale_transfer(self.sender.id,self.transfer_id, num_workers, blocksize)
+        
         return self.get(), self.get_stats()
 
 class NVMEConnection(Connection):
@@ -850,3 +944,16 @@ class DTNOrchestratorClient(object):
             return transfer_id
         else:
             raise Exception(f"Error starting transfer: {str(result.json)}") from None
+
+    def scale_transfer(self, sender, transfer_id, num_workers, blocksize):
+        sender = self._id2dtn(sender)
+        result = requests.post(self.base_url + f"transfer/{transfer_id}/scale/", headers=sender._token_header(),
+        json={
+            "num_workers": num_workers,
+            "blocksize": blocksize
+        })
+        if result.status_code == 200:
+            print("changing transfer")
+            self.get_transfer(transfer_id)
+        else:
+            raise Exception(f"Error changing transfer: {str(result.json)}")
