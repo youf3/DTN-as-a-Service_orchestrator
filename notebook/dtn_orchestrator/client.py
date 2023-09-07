@@ -94,30 +94,6 @@ class DTN(object):
             return result.json()
         else:
             raise Exception(result.text)
-    
-    def get_files(
-        self,
-        directory: str = None,
-        return_df: bool = False,
-        verbose: bool = False,
-    ) -> Union[tuple[filter, filter], pandas.DataFrame]:
-        """
-        Returns directories and files relative to <directory>
-        """
-        res = requests.get(f"http://{self.man_addr}/files/{directory}", headers=self._token_header())
-        if verbose:
-            print(res)
-        res_json = res.json()
-
-        directories = filter(lambda x: x["type"] == "dir", res_json)
-        files = filter(lambda x: x["type"] == "file", res_json)
-
-        if return_df:
-            directories_df = pandas.DataFrame(directories)
-            files_df = pandas.DataFrame(files)
-            return directories_df, files_df
-
-        return directories, files
 
     def create_dirs(self, dirlist):
         """
@@ -351,7 +327,7 @@ class Connection(object):
         self._status = "disconnected"
         pass # nothing needed on disconnection
 
-    def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
+    def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, min_size=None, max_size=None):
         """
         Copy all files from a sender DTN's source directory to a receiver DTN's destination directory.
         This starts a file transfer between two DTNs, and provides data to track transfer progress.
@@ -362,6 +338,9 @@ class Connection(object):
         :num_workers: Number of worker processes to facilitate the transfer.
         :blocksize: Block size for the transfer in bytes.
         :zerocopy: Zerocopy setting for nuttcp.
+        :require_stats: If True, fail the copy if statistics cannot be retrieved.
+        :min_size: If set, don't copy files below this size (in bytes).
+        :max_size: If set, don't copy files above this size (in bytes).
 
         :returns: A Transfer namedtuple that contains the transfer ID, and list 
         of source and destination files that will be copied.
@@ -383,6 +362,12 @@ class Connection(object):
             if limit and index >= limit:
                 break # stop copying
             if read_files[rf]['type'] == 'file':
+                if min_size is not None and read_files[rf]['size'] < min_size:
+                    # skip, file too small
+                    continue
+                elif max_size is not None and read_files[rf]['size'] > max_size:
+                    # skip, file too big
+                    continue
                 complete_source_files.append(os.path.join(sourcedir, rf))
                 complete_destination_files.append(os.path.join(destinationdir, rf))
             elif read_files[rf]['type'] == 'dir':
@@ -408,49 +393,6 @@ class Connection(object):
                 num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy)
         self._status = "copy initiated"
         return Transfer(self.transfer_id, complete_source_files, complete_destination_files)
-
-    def copy_with_file_size(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, min_size=None, max_size=None):
-            
-            if self._status == "disconnected":
-                raise Exception("copy after disconnect")
-
-            # get files from sender and key them by path for easy lookups
-            directories_df, files_df = self.sender.get_files(directory=sourcedir, return_df=True)
-            des_dir = directories_df["name"]
-            files_df["FILE_SIZE (MB)"] = files_df["size"] / 1024**2
-            masks = [
-                [True] * len(files_df),
-                files_df["FILE_SIZE (MB)"] >= min_size,
-                files_df["FILE_SIZE (MB)"] <= max_size,
-            ]
-            transfer_files_df = files_df[reduce(and_, masks)]
-            transfer_files_df = transfer_files_df.sort_values(by=['size'], ascending=False)
-            transfer_filenames = transfer_files_df["name"]
-            src_files = [os.path.join(sourcedir, filename) for filename in transfer_filenames]
-            dst_files = [os.path.join(destinationdir, filename) for filename in transfer_filenames]
-            dirs = [os.path.join(destinationdir, i) for i in des_dir]
-            
-            # make sure directories exist on receiver
-            self.receiver.create_dirs(dirs)
-            
-            try:
-                # get latency and blocksize for metrics later
-                self.latency = self.orchestrator.ping(self.sender, self.receiver).get('latency')
-                self.blocksize = blocksize
-
-                pre_dataframe = self.extractor.extract(self.sender, self.receiver)
-                self.pre_csv = pre_dataframe.to_csv(header=True, index=False)
-            except Exception as e:
-                print('Stats error: ' + str(e))
-                if require_stats:
-                    raise e
-
-            self.transfer_id = self.orchestrator.transfer(src_files, dst_files,
-                    self.sender.id, self.receiver.id, tool=self.tool,
-                    num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy)
-            self._status = "copy initiated"
-            print(f'file number:{len(transfer_files_df.index)}')
-            return Transfer(self.transfer_id, src_files, dst_files)
 
     def memtest(self, duration=60, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
         """
