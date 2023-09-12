@@ -317,10 +317,10 @@ def transfer(tool,sender_id, receiver_id):
 
 @app.route('/wait/<int:transfer_id>', methods=['POST'])
 def wait(transfer_id):
+    global transfer_runners
     if transfer_id not in transfer_runners:
         abort(make_response(jsonify(message="Transfer ID not found")), 404)
 
-    global transfer_runners
     with runner_lock:
         transfer = Transfer.query.get_or_404(transfer_id)
         transfer_runners[transfer_id].wait()
