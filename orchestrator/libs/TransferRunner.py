@@ -112,7 +112,7 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
             raise TransferException("Unable to connect to DTN")
         except TransferException as e:
             # transfer failed, try again after a short sleep
-            logging.debug(f"transfer exception: {e}")
+            logging.error(f"transfer exception, {sender.addr} -> {receiver.addr} {srcfile}: {e}")
             time.sleep(0.5)
             continue
         finally:

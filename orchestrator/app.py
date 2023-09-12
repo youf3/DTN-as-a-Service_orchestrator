@@ -149,9 +149,12 @@ def get_transfer(transfer_id):
         'num_workers' : transfer.num_workers,
         'num_files' : transfer.num_files,
         'latency' : transfer.latency,
-        'worker_type_id' : transfer.worker_type_id
+        'worker_type_id' : transfer.worker_type_id,
+        # compute some helpful statistics too
+        'elapsed_time': transfer.end_time.timestamp() - transfer.start_time.timestamp(),
+        'transfer_rate': (transfer.file_size / (transfer.end_time.timestamp() - transfer.start_time.timestamp())),
     }
-    return jsonify(data)    
+    return jsonify(data)
 
 @app.route('/transfer/<string:tool>', methods=['GET'])
 def get_transfer_for_tool(tool):
@@ -174,7 +177,18 @@ def get_transfer_for_tool(tool):
 
 @app.route('/transfer/<int:transfer_id>',  methods=['DELETE'])
 def delete_transfer(transfer_id):
+    # delete the database session
     transfer = Transfer.query.get_or_404(transfer_id)
+
+    # clear the transfer from the runner list if active
+    global transfer_runners
+    with runner_lock:
+        if transfer_id in transfer_runners:
+            transfer_runners[transfer_id].cancel()
+            transfer_runners[transfer_id].wait()
+            transfer_runners[transfer_id].shutdown()
+            del transfer_runners[transfer_id]
+
     db.session.delete(transfer)
     try:
         db.session.commit()
@@ -186,9 +200,17 @@ def delete_transfer(transfer_id):
 @app.route('/transfer/all',  methods=['DELETE'])
 def delete_all_transfers():
     transfers = Transfer.query.all()
+    # delete all transfers
     for transfer in transfers:
         db.session.delete(transfer)
-    db.session.delete(transfer)
+
+    # delete all running transfers
+    global transfer_runners
+    with runner_lock:
+        for transfer_id in transfer_runners:
+            transfer_runners[transfer_id].cancel()
+            transfer_runners[transfer_id].shutdown()
+            del transfer_runners[transfer_id]
     try:
         db.session.commit()
     except sqlalchemy.exc.IntegrityError:
@@ -298,6 +320,7 @@ def wait(transfer_id):
     if transfer_id not in transfer_runners:
         abort(make_response(jsonify(message="Transfer ID not found")), 404)
 
+    global transfer_runners
     with runner_lock:
         transfer = Transfer.query.get_or_404(transfer_id)
         transfer_runners[transfer_id].wait()
