@@ -14,9 +14,6 @@ import pandas
 from prometheus_http_client import Prometheus
 from http.client import HTTPException, RemoteDisconnected
 from collections import namedtuple
-from functools import reduce
-from operator import and_
-from typing import Union
 
 Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
 TIMEOUT = 30
@@ -559,12 +556,9 @@ class Connection(object):
         
         copy_and_wait() accepts the same arguments as copy().
         """
-        if (min_size == None or max_size == None):
-            copydata = self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers,
-                blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats)
-        else:
-            copydata = self.copy_with_file_size(sourcedir, destinationdir, limit=limit, num_workers=num_workers,
-                blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats, min_size=min_size, max_size=max_size)
+        copydata = self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers,
+            blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats, min_size=min_size, max_size=max_size)
+        print(f'Started transfer #{copydata.id}')
 
         finished = False
         while not finished:
@@ -583,10 +577,51 @@ class Connection(object):
         # get stats and return
         return self.get(), self.get_stats()
 
-    def change_current_trans(self,num_workers,blocksize):
+    def copy_multi_stream(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, stream_sizes=[]):
+        """
+        Start multiple copy() streams, with each stream copying files of various sizes.
+        Example:
+            copy_multi_stream('read', 'write', num_workers=...., stream_sizes=[5000000,1000000000])
+
+            This will create three streams, one copying files zero to 5MB, one copying 5MB to 1000MB, and one copying 1000MB and up.
         
-        self.orchestrator.scale_transfer(self.sender.id,self.transfer_id, num_workers, blocksize)
-        
+        copy_multi_stream() accepts the same arguments as copy(), with stream_size.
+
+        :param stream_size: An array describing file size delimiters.
+
+        :returns: A list of Transfer namedtuples that contains the transfer ID, and list 
+        of source and destination files that will be copied.
+        """
+        if len(stream_sizes) == 0:
+            # just return a single stream
+            return [self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats)]
+        else:
+            current_min = None
+            current_max = None
+            copies = []
+            for size in stream_sizes:
+                current_min = current_max
+                current_max = size
+                copies.append(self.copy(
+                    sourcedir, destinationdir,
+                    limit=limit, num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats,
+                    min_size=current_min, max_size=current_max))
+            # last iteration
+            copies.append(self.copy(
+                        sourcedir, destinationdir,
+                        limit=limit, num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats,
+                        min_size=current_max, max_size=None))
+            return copies
+
+    def change_current_trans(self, num_workers, blocksize):
+        """
+        Scale the transfer by num_workers or blocksize.
+
+        :param num_workers: Number of workers as an integer.
+        :param blocksize: Block size in kilobytes.
+        """
+        self.orchestrator.scale_transfer(self.sender.id, self.transfer_id, num_workers, blocksize)
+
         return self.get(), self.get_stats()
 
 class NVMEConnection(Connection):
