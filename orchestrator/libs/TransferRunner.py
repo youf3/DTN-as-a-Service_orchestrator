@@ -22,6 +22,9 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
         raise ValueError("params requires blocksize")
     if not srcfile and 'duration' not in params:
         raise ValueError("params requires duration if no sourcefile given")
+    # no retries if this is a mem-to-mem copy
+    if not srcfile and not dstfile:
+        retry = 1
     for i in range(retry):
         try:
             # ensure this data is thread-specific
@@ -93,11 +96,16 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
                     f"http://{sender.addr}/free_port/{tool}/{port}",
                     json=receiver_check)
                 if response.status_code != 200:
-                    raise TransferException('Transfer and sender cleanup failed for port %s' %port)
-                raise TransferException('Transfer has failed for port %s' %port)
+                    raise TransferException(f"Transfer and sender cleanup failed for port {port}, HTTP {response.status_code}: {response.text}")
+                raise TransferException(f"Transfer has failed for port {port}, HTTP {transfer_status.status_code}: {transfer_status.text}")
 
             sender_check = receiver_check
             sender_check['node'] = 'sender'
+
+            # if we're running mem-to-mem tests, the receiver reports size instead of sender
+            if srcfile == None and len(transfer_status.json()) > 1:
+                transfer_info['size'] = transfer_status.json()[1]
+
             # check transfer status with the sender
             sndr_response = sender_session.get(
                 f"http://{sender.addr}/{tool}/poll",
@@ -108,9 +116,9 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
 
             # transfer complete
             return transfer_info, datetime.utcnow()
-        except requests.exceptions.ConnectionError:
-            raise TransferException("Unable to connect to DTN")
         except TransferException as e:
+            if isinstance(e, requests.exceptions.ConnectionError):
+                logging.error("Unable to connect to DTN")
             # transfer failed, try again after a short sleep
             logging.error(f"transfer exception, {sender.addr} -> {receiver.addr} {srcfile}: {e}")
             time.sleep(0.5)

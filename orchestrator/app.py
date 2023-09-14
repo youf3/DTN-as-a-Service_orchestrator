@@ -12,11 +12,10 @@ from threading import Lock
 from libs.Schemes import NumaScheme
 from libs.TransferRunner import Sender, Receiver, TransferRunner
 
-## uncomment for debug logging
-# logging.basicConfig(
-#     format='%(asctime)s %(levelname)-8s %(message)s',
-#     level=logging.DEBUG,
-#     datefmt='%Y-%m-%d %H:%M:%S')
+logging.basicConfig(
+    format='%(asctime)s %(levelname)-8s %(message)s',
+    level=logging.getLevelName(os.environ.get('LOG_LEVEL', 'info').upper()),
+    datefmt='%Y-%m-%d %H:%M:%S')
 
 app = Flask(__name__)
 app.secret_key = os.urandom(16)
@@ -328,9 +327,11 @@ def wait(transfer_id):
         transfer.file_size = transfer_runners[transfer_id].transfer_size
         transfer.end_time = transfer_runners[transfer_id].end_time
         failed_files = transfer_runners[transfer_id].failed_files
+        if len(failed_files) > 0 and failed_files[0] is not None:
+            failed_files = sorted(failed_files)
         try:
             db.session.commit()
-            return jsonify({'result': True, 'failed': sorted(failed_files)})
+            return jsonify({'result': True, 'failed': failed_files})
         except sqlalchemy.exc.IntegrityError:
             traceback.print_exc()
             abort(make_response(jsonify(message="Unable to update transfer"), 400))   
