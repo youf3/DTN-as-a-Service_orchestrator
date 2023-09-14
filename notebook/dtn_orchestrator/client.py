@@ -401,6 +401,14 @@ class Connection(object):
     def memtest(self, duration=60, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
         """
         Run a memory-to-memory test between the DTNs. This accepts a duration in seconds.
+
+        :param duration: Duration of the memory-to-memory test in seconds.
+        :num_workers: Number of worker processes to facilitate the transfer.
+        :blocksize: Block size for the transfer in bytes.
+        :zerocopy: Zerocopy setting for nuttcp.
+
+        :returns: A Transfer namedtuple that contains the transfer ID, and list 
+        of None objects unique to memtests.
         """
         try:
             # get latency and blocksize for metrics later
@@ -422,6 +430,51 @@ class Connection(object):
                 num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, duration=duration)
         self._status = "memtest initiated"
         return Transfer(self.transfer_id, fakefiles, fakefiles)
+
+    def simple_optimization(self, duration=10, num_workers=1, starting_blocksize=8192, limit=10):
+        """
+        Run a simple optimization loop with memory-to-memory tests.
+
+        :param duration: Duration of the memory-to-memory test (per cycle!) in seconds.
+        :num_workers: Number of worker processes to facilitate the test.
+        :param starting_blocksize: Starting blocksize in kilobytes. This will be increased each cycle.
+        :param limit: Maximum number of cycles to be run.
+        """
+        blocksize = starting_blocksize
+        fastest_blocksize = 0
+        previous_rate = 0
+        multiplier = 2
+        memtest_timeout = duration * 2
+        for i in range(limit):
+            self.memtest(duration=duration, num_workers=num_workers, blocksize=blocksize)
+            for poll in range(memtest_timeout + 1):
+                result = self.finish()
+                if not result.get('result', False):
+                    # memtest still running, continue
+                    time.sleep(1)
+                    continue
+                # done with this cycle
+                transfer_result = self.get()
+                if not transfer_result.get('transfer_rate'):
+                    print(transfer_result)
+                    raise Exception("transfer_rate not found in results - failure or old agent version?")
+                current_rate = transfer_result.get('transfer_rate')
+                print(f"blocksize={blocksize} rate={current_rate}")
+                if current_rate > previous_rate:
+                    fastest_blocksize = blocksize
+                    blocksize = int(blocksize * multiplier)
+                elif current_rate <= previous_rate:
+                    if multiplier > 1:
+                        # blocksize is too big, reduce it
+                        multiplier = 0.75
+                        blocksize = int(blocksize * multiplier)
+                    else:
+                        # we already reduced blocksize, so this is the peak
+                        return fastest_blocksize
+                previous_rate = current_rate
+                break
+        # exhausted our cycles
+        return fastest_blocksize
 
     def status(self):
         """
