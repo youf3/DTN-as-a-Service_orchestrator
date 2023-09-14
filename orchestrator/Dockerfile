@@ -10,4 +10,9 @@ COPY . /orchestrator
 
 EXPOSE 5001
 
-ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:5001", "--log-level", "info", "app:app"]
+ENV LOG_LEVEL="info"
+
+ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:5001", \
+    "--access-logfile", "-", "--access-logformat", \
+    "%(h)s %(t)s \"%(r)s\" %(s)s %(b)s %(M)s", \
+    "app:app"]

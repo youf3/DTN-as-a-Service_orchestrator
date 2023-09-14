@@ -12,13 +12,14 @@ import jwt
 import time
 import pandas
 from prometheus_http_client import Prometheus
-from http.client import HTTPException
+from http.client import HTTPException, RemoteDisconnected
 from collections import namedtuple
 from functools import reduce
 from operator import and_
 from typing import Union
 
 Transfer = namedtuple("Transfer", ['id', 'srcfiles', 'dstfiles'])
+TIMEOUT = 30
 
 # TODO save these in the DTN object on the orchestrator. 
 #  This hardcoded/static map is needed since Prometheus jobs are different from
@@ -74,10 +75,23 @@ class DTN(object):
         except:
             return "DTN " + str(self.id if hasattr(self, "id") else 0)
 
+    def __eq__(self, other):
+        # don't compare ID! they may be functionally the same, but on different clients
+        return (
+                self.name == other.name
+                and (hasattr(self, 'man_addr') and hasattr(other, 'man_addr') and self.man_addr == other.man_addr)
+                and (hasattr(self, 'data_addr') and hasattr(other, 'data_addr') and self.data_addr == other.data_addr)
+                and (hasattr(self, 'jwt_token') and hasattr(other, 'jwt_token') and self.jwt_token == other.jwt_token))
+
     def _token_header(self):
         if hasattr(self, 'jwt_token') and self.jwt_token:
             encoded_data = {'sub': getpass.getuser()}
             return {"Authorization": f"Bearer {jwt.encode(encoded_data, self.jwt_token, 'HS256')}"}
+
+    def get_jwt(self):
+        if hasattr(self, 'jwt_token') and self.jwt_token:
+            encoded_data = {'sub': getpass.getuser()}
+            return jwt.encode(encoded_data, self.jwt_token, 'HS256')
 
     def files(self, filedir=None):
         """
@@ -89,7 +103,10 @@ class DTN(object):
         type (file or dir) and size.
         """
         # TODO permissions checking
-        result = requests.get(f"http://{self.man_addr}/files/{filedir if filedir else ''}", headers=self._token_header())
+        result = requests.get(
+            f"http://{self.man_addr}/files/{filedir if filedir else ''}",
+            headers=self._token_header(),
+            timeout=TIMEOUT)
         if result.status_code == 200:
             return result.json()
         else:
@@ -101,7 +118,11 @@ class DTN(object):
 
         :param dirlist: List of directories to create.
         """
-        mkdir_result = requests.post(f"http://{self.man_addr}/create_dir/", headers=self._token_header(), json=dirlist)
+        mkdir_result = requests.post(
+            f"http://{self.man_addr}/create_dir/",
+            headers=self._token_header(),
+            json=dirlist,
+            timeout=TIMEOUT)
         if mkdir_result.status_code != 200:
             raise Exception(f"Error creating directories, code {mkdir_result.status_code} ({mkdir_result.text})") from None
 
@@ -119,7 +140,7 @@ class DTN(object):
         """
         Get NVME drives available on the DTN.
         """
-        result = requests.get(f"http://{self.man_addr}/nvme/devices", headers=self._token_header())
+        result = requests.get(f"http://{self.man_addr}/nvme/devices", headers=self._token_header(), timeout=TIMEOUT)
         if result.status_code != 200:
             raise Exception(f"Error retrieving NVMEoF data") from None
         return result.json()
@@ -287,6 +308,8 @@ class StatsExtractor(object):
             
             dataset = data_in_period if dataset is None else dataset.append(data_in_period)
             start_time = next_hop_ts
+        if dataset is None:
+            raise Exception('No data found in time range')
         cols = dataset.columns.tolist()
         labels_to_rearrange = ['NVMe_total_util', 'NVMe_transfer_bytes']    
         for i in labels_to_rearrange:
@@ -374,6 +397,8 @@ class Connection(object):
                 created_dirs.append(os.path.join(destinationdir, rf))
         
         # make sure directories exist on receiver
+        if not created_dirs:
+            created_dirs.append(sourcedir)
         self.receiver.create_dirs(created_dirs)
 
         try:
@@ -397,6 +422,14 @@ class Connection(object):
     def memtest(self, duration=60, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False):
         """
         Run a memory-to-memory test between the DTNs. This accepts a duration in seconds.
+
+        :param duration: Duration of the memory-to-memory test in seconds.
+        :num_workers: Number of worker processes to facilitate the transfer.
+        :blocksize: Block size for the transfer in bytes.
+        :zerocopy: Zerocopy setting for nuttcp.
+
+        :returns: A Transfer namedtuple that contains the transfer ID, and list 
+        of None objects unique to memtests.
         """
         try:
             # get latency and blocksize for metrics later
@@ -418,6 +451,51 @@ class Connection(object):
                 num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, duration=duration)
         self._status = "memtest initiated"
         return Transfer(self.transfer_id, fakefiles, fakefiles)
+
+    def simple_optimization(self, duration=10, num_workers=1, starting_blocksize=8192, limit=10):
+        """
+        Run a simple optimization loop with memory-to-memory tests.
+
+        :param duration: Duration of the memory-to-memory test (per cycle!) in seconds.
+        :num_workers: Number of worker processes to facilitate the test.
+        :param starting_blocksize: Starting blocksize in kilobytes. This will be increased each cycle.
+        :param limit: Maximum number of cycles to be run.
+        """
+        blocksize = starting_blocksize
+        fastest_blocksize = 0
+        previous_rate = 0
+        multiplier = 2
+        memtest_timeout = duration * 2
+        for i in range(limit):
+            self.memtest(duration=duration, num_workers=num_workers, blocksize=blocksize)
+            for poll in range(memtest_timeout + 1):
+                result = self.finish()
+                if not result.get('result', False):
+                    # memtest still running, continue
+                    time.sleep(1)
+                    continue
+                # done with this cycle
+                transfer_result = self.get()
+                if not transfer_result.get('transfer_rate'):
+                    print(transfer_result)
+                    raise Exception("transfer_rate not found in results - failure or old agent version?")
+                current_rate = transfer_result.get('transfer_rate')
+                print(f"blocksize={blocksize} rate={current_rate}")
+                if current_rate > previous_rate:
+                    fastest_blocksize = blocksize
+                    blocksize = int(blocksize * multiplier)
+                elif current_rate <= previous_rate:
+                    if multiplier > 1:
+                        # blocksize is too big, reduce it
+                        multiplier = 0.75
+                        blocksize = int(blocksize * multiplier)
+                    else:
+                        # we already reduced blocksize, so this is the peak
+                        return fastest_blocksize
+                previous_rate = current_rate
+                break
+        # exhausted our cycles
+        return fastest_blocksize
 
     def status(self):
         """
@@ -467,9 +545,12 @@ class Connection(object):
         (dependent on the tool used for the transfer)
         """
         if self.transfer_id:
-            return self.orchestrator.finish_transfer(self.transfer_id,
+            result = self.orchestrator.finish_transfer(self.transfer_id,
                     sender=(self.sender if cleanup else None),
                     tool=(self.tool if cleanup else None))
+            if result.get('result') and 'failed' in result.keys():
+                self._status = f"Copy finished with {len(result['failed'])} failures"
+            return result
 
     def copy_and_wait(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, min_size=None, max_size=None):
         """
@@ -633,7 +714,7 @@ class DTNOrchestratorClient(object):
         
         :returns: List of DTN objects.
         """
-        dtnlist = requests.get(self.base_url + f"DTN/").json()
+        dtnlist = requests.get(self.base_url + f"DTN/", timeout=TIMEOUT).json()
         return [DTN(self, dtnjson) for dtnjson in dtnlist]
 
     def get_dtn(self, id):
@@ -644,7 +725,7 @@ class DTNOrchestratorClient(object):
         :returns: DTN object if found, otherwise a ValueError is raised.
         """
         try:
-            result = requests.get(self.base_url + f"DTN/{id}")
+            result = requests.get(self.base_url + f"DTN/{id}", timeout=TIMEOUT)
             dtn = DTN(self, result.json())
         except json.JSONDecodeError:
             raise ValueError(f"DTN ID {id} not found on orchestrator") from None
@@ -677,7 +758,8 @@ class DTNOrchestratorClient(object):
             'username': username,
             'interface': interface,
             'jwt_token': jwt_token
-            })
+            },
+            timeout=TIMEOUT)
         # TODO error checking
         if result.status_code != 200:
             print(f"Error {result.status_code}")
@@ -699,18 +781,21 @@ class DTNOrchestratorClient(object):
 
         :returns: A DTN object with the created DTN data.
         """
-        result = requests.post(f"http://{address}:{port}/register", json={
-            "address": address,
-            "data_addr": data_addr,
-            "interface": interface,
-        })
-        if result.status_code != 200:
-            print(f"Error {result.status_code}")
-            raise Exception(result.text)
-        dtn_data = result.json()
-        return self.add_dtn(dtn_data["name"], f'{dtn_data["man_addr"]}:{port}',
-            dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"],
-            jwt_token=dtn_data.get("jwt_token", ""))
+        try:
+            result = requests.post(f"http://{address}:{port}/register", json={
+                "address": address,
+                "data_addr": data_addr,
+                "interface": interface,
+            }, timeout=TIMEOUT)
+            if result.status_code != 200:
+                print(f"Error {result.status_code}")
+                raise Exception(result.text)
+            dtn_data = result.json()
+            return self.add_dtn(dtn_data["name"], f'{dtn_data["man_addr"]}:{port}',
+                dtn_data["data_addr"], dtn_data["username"], dtn_data["interface"],
+                jwt_token=dtn_data.get("jwt_token", ""))
+        except TimeoutError:
+            raise TimeoutError("Connection timed out to DTN agent") from None
 
     def delete_dtn(self, dtn):
         """
@@ -722,7 +807,7 @@ class DTNOrchestratorClient(object):
         """
         dtn = self._id2dtn(dtn)
         # TODO permissions checking
-        result = requests.delete(self.base_url + f"DTN/{dtn.id}")
+        result = requests.delete(self.base_url + f"DTN/{dtn.id}", timeout=TIMEOUT)
         # TODO error checking
         return result.json()
 
@@ -759,7 +844,7 @@ class DTNOrchestratorClient(object):
         """
         Get a list of running transfers from the orchestrator.
         """
-        result = requests.get(self.base_url + "running")
+        result = requests.get(self.base_url + "running", timeout=TIMEOUT)
         try:
             return result.json()
         except json.JSONDecodeError:
@@ -774,7 +859,7 @@ class DTNOrchestratorClient(object):
         message "need to wait for transfer #id".
         """
         # TODO permissions checking
-        result = requests.get(self.base_url + f"transfer/{id}")
+        result = requests.get(self.base_url + f"transfer/{id}", timeout=TIMEOUT)
         if result.status_code == 404:
             raise ValueError("Transfer not found")
         return result.json()
@@ -792,7 +877,7 @@ class DTNOrchestratorClient(object):
         }
         """
         # TODO permissions checking
-        result = requests.get(self.base_url + f"check/{id}")
+        result = requests.get(self.base_url + f"check/{id}", timeout=TIMEOUT)
         if result.status_code == 200:
             return result.json()
     
@@ -816,7 +901,7 @@ class DTNOrchestratorClient(object):
             # TODO don't assume nuttcp as the transfer tool
             if sender and tool:
                 sender = self._id2dtn(sender)
-                requests.get(f"{sender.man_addr}/cleanup/{tool}", headers=sender._token_header())
+                requests.get(f"{sender.man_addr}/cleanup/{tool}", headers=sender._token_header(), timeout=TIMEOUT)
             
             wait_data = requests.post(self.base_url + f"wait/{transfer_id}")
             if wait_data.status_code == 200:
@@ -825,6 +910,19 @@ class DTNOrchestratorClient(object):
                 raise Exception(f"Error finishing transfer, code {wait_data.status_code}: {str(wait_data.text)}") from None
         else:
             return status
+
+    def delete_transfer(self, transfer_id):
+        """
+        Delete a transfer from the orchestrator.
+
+        :param transfer_id: Transfer ID as an integer.
+        
+        :returns: None if the deletion was successful.
+        """
+        result = requests.delete(self.base_url + f"transfer/{transfer_id}", timeout=TIMEOUT)
+        if result.status_code == 200:
+            return
+        raise Exception(f"Transfer deletion raised an error {result.status_code}: {result.text}")
 
     def ping(self, sender, receiver):
         """
@@ -839,13 +937,19 @@ class DTNOrchestratorClient(object):
         sender = self._id2dtn(sender)
         receiver = self._id2dtn(receiver)
         # TODO permissions checking
-        result = requests.get(self.base_url + f"ping/{sender.id}/{receiver.id}", headers=sender._token_header())
-        if result.status_code == 401:
-            raise Exception("Not authorized (DTN not registered?)") from None
-        if result.status_code == 200:
-            return result.json()
-        else:
-            raise Exception(f"Error {result.status_code} running ping from {sender.name}") from None
+        try:
+            result = requests.get(
+                self.base_url + f"ping/{sender.id}/{receiver.id}",
+                headers=sender._token_header(),
+                timeout=TIMEOUT)
+            if result.status_code == 401:
+                raise Exception("Not authorized (DTN not registered?)") from None
+            if result.status_code == 200:
+                return result.json()
+            else:
+                raise Exception(f"Error {result.status_code} running ping from {sender.name}") from None
+        except RemoteDisconnected:
+            raise Exception("Orchestrator worker timed out") from None
 
     def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, 
             num_workers=1, blocksize=8192, zerocopy=False, duration=None):
@@ -867,19 +971,22 @@ class DTNOrchestratorClient(object):
         # TODO permissions checking
         # note! file/directory checking is NOT done here, that should be 
         # taken care of before sourcesfiles/destfiles gets passed
-        result = requests.post(self.base_url + f"transfer/{tool}/{sender.id}/{receiver.id}", headers=sender._token_header(),
-        json={
-            "srcfile": sourcefiles,
-            "dstfile": destfiles,
-            # sender/receiver auth
-            "sender_token": sender.jwt_token,
-            "receiver_token": receiver.jwt_token,
-            "remote_mount": remote_mount,
-            "num_workers": num_workers,
-            "blocksize": blocksize,
-            "zerocopy": zerocopy,
-            "duration": duration
-        })
+        result = requests.post(
+            self.base_url + f"transfer/{tool}/{sender.id}/{receiver.id}",
+            headers=sender._token_header(),
+            json={
+                "srcfile": sourcefiles,
+                "dstfile": destfiles,
+                # sender/receiver auth
+                "sender_token": sender.get_jwt(),
+                "receiver_token": receiver.get_jwt(),
+                "remote_mount": remote_mount,
+                "num_workers": num_workers,
+                "blocksize": blocksize,
+                "zerocopy": zerocopy,
+                "duration": duration
+            },
+            timeout=TIMEOUT)
         if result.status_code == 200:
             # get the transfer ID and start waiting
             transfer_id = result.json().get("transfer")

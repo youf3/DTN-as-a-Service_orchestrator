@@ -1,19 +1,21 @@
-import requests
 import datetime
+import logging
 import os
-import time
-from flask import Flask, request, jsonify, abort, make_response, json#, session
+import requests
+import sqlalchemy
+import traceback
+from flask import Flask, request, jsonify, abort, make_response, json
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate, upgrade
-import sqlalchemy
-import logging
-import traceback
-import itertools
-import concurrent.futures
-import libs.ThreadExecutor
+from threading import Lock
 
 from libs.Schemes import NumaScheme
-logging.getLogger().setLevel(logging.DEBUG)
+from libs.TransferRunner import Sender, Receiver, TransferRunner
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)-8s %(message)s',
+    level=logging.getLevelName(os.environ.get('LOG_LEVEL', 'info').upper()),
+    datefmt='%Y-%m-%d %H:%M:%S')
 
 app = Flask(__name__)
 app.secret_key = os.urandom(16)
@@ -21,10 +23,8 @@ app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.getcwd()}/db/dtn.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
-thread_executor_pools = {}
-last_sizes = {}
-
-gparams = {'blocksize' : 64}
+transfer_runners = {}
+runner_lock = Lock()
 
 class TransferException(Exception):
     def __init__(self, msg):
@@ -94,88 +94,6 @@ def init_db():
             #traceback.print_exc()
             abort(make_response(jsonify(message="Unable to add DTN"), 400))
 
-def transfer_job(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data, timeout=None, retry=5, sender_token=None, receiver_token=None):
-    for i in range(0, retry):
-        result = run_transfer(sender, sender_data_ip, receiver, srcfile, dstfile, tool, data, sender_token=sender_token, receiver_token=receiver_token)
-        result['timeout'] = timeout
-        try:
-            end_time = wait_for_transfer(sender, receiver, tool, result, sender_token=sender_token, receiver_token=receiver_token)
-        except TransferException as e:
-            time.sleep(1)
-            continue
-        return result, end_time
-    raise Exception('Retry exceeded')
-
-def run_transfer(sender_ip, sender_data_ip, receiver_ip, srcfile, dstfile, tool, params, sender_token=None, receiver_token=None):
-    global gparams
-
-    try:        
-        # logging.debug('Running sender')
-        ## sender
-        params['file'] = srcfile
-        if 'remote_mount' in params and params['remote_mount']:
-            # if we're using 'dd' for NVMEoF, trim off the remote mount directory
-            # since that's only valid on the receiver side
-            params['file'] = params['file'].replace(params['remote_mount'], "")
-        params['blocksize'] = gparams['blocksize']
-        if srcfile == None and 'duration' not in params:
-            abort(make_response(jsonify(message="Need duration for mem-to-mem transfer"), 400))
-        response = requests.post('http://{}/sender/{}'.format(sender_ip, tool), json=params,
-            headers=({"Authorization": f"Bearer {sender_token}"} if sender_token else None))
-        result = response.json()
-        if response.status_code == 404 and 'message' in result:
-            abort(make_response(jsonify(message=result['message']), 404))
-        if response.status_code != 200 or result.pop('result') != True:
-            abort(make_response(jsonify(message="Unable start sender"), 400))
-        if srcfile == None:
-            result['duration'] = params['duration']
-        else:
-            file_size = result['size']
-
-        ## receiver
-        # logging.debug('Running Receiver')
-        if 'remote_mount' in params and params['remote_mount']:
-            # patch the srcfile path here too, since it got written by the sender
-            result['srcfile'] = os.path.join(params['remote_mount'], params['file'])
-
-        result['address'] = sender_data_ip
-        result['file'] = dstfile
-        result['blocksize'] = gparams['blocksize']
-
-        response = requests.post('http://{}/receiver/{}'.format(receiver_ip, tool), json=result,
-            headers=({"Authorization": f"Bearer {receiver_token}"} if receiver_token else None))
-        result = response.json()
-        result['dstfile'] = dstfile
-        if srcfile != None:
-            result['size'] = file_size
-        
-        if response.status_code != 200 or result.pop('result') != True:
-            abort(make_response(jsonify(message="Unable start receiver"), 400))
-    except requests.exceptions.ConnectionError:
-        abort(make_response(jsonify(message="Unable to connect to DTN"), 503))
-    return result
-
-def wait_for_transfer(sender_ip, receiver_ip, tool, transfer_param, sender_token=None, receiver_token=None):
-    transfer_param['node'] = 'receiver'    
-    port = transfer_param['cport']
-    rcvr_response = requests.get('http://{}/{}/poll'.format(receiver_ip, tool), json=transfer_param,
-        headers=({"Authorization": f"Bearer {receiver_token}"} if receiver_token else None))
-    if rcvr_response.status_code != 200 or rcvr_response.json()[0] != 0:
-        response = requests.get('http://{}/free_port/{}/{}'.format(sender_ip, tool, port), json=transfer_param,
-            headers=({"Authorization": f"Bearer {sender_token}"} if sender_token else None))
-        if response.status_code != 200:
-            raise Exception('Transfer and sender cleanup failed for port %s' %port)
-        raise TransferException('Transfer has failed for port %s' %port)
-        #abort(make_response(jsonify(message="Transfer has failed"), 400))
-
-    transfer_param['node'] = 'sender'    
-    sndr_response = requests.get('http://{}/{}/poll'.format(sender_ip, tool), json=transfer_param,
-        headers=({"Authorization": f"Bearer {sender_token}"} if sender_token else None))
-    if sndr_response.status_code != 200 or sndr_response.json() != 0:
-        #abort(make_response(jsonify(message="Transfer has failed"), 400))
-        raise Exception('Transfer has failed')
-    return datetime.datetime.utcnow()
-
 @app.route('/DTN/<int:id>')
 def get_DTN(id):
     target_DTN = DTN.query.get_or_404(id)
@@ -230,9 +148,12 @@ def get_transfer(transfer_id):
         'num_workers' : transfer.num_workers,
         'num_files' : transfer.num_files,
         'latency' : transfer.latency,
-        'worker_type_id' : transfer.worker_type_id
+        'worker_type_id' : transfer.worker_type_id,
+        # compute some helpful statistics too
+        'elapsed_time': transfer.end_time.timestamp() - transfer.start_time.timestamp(),
+        'transfer_rate': (transfer.file_size / (transfer.end_time.timestamp() - transfer.start_time.timestamp())),
     }
-    return jsonify(data)    
+    return jsonify(data)
 
 @app.route('/transfer/<string:tool>', methods=['GET'])
 def get_transfer_for_tool(tool):
@@ -255,7 +176,18 @@ def get_transfer_for_tool(tool):
 
 @app.route('/transfer/<int:transfer_id>',  methods=['DELETE'])
 def delete_transfer(transfer_id):
+    # delete the database session
     transfer = Transfer.query.get_or_404(transfer_id)
+
+    # clear the transfer from the runner list if active
+    global transfer_runners
+    with runner_lock:
+        if transfer_id in transfer_runners:
+            transfer_runners[transfer_id].cancel()
+            transfer_runners[transfer_id].wait()
+            transfer_runners[transfer_id].shutdown()
+            del transfer_runners[transfer_id]
+
     db.session.delete(transfer)
     try:
         db.session.commit()
@@ -267,9 +199,17 @@ def delete_transfer(transfer_id):
 @app.route('/transfer/all',  methods=['DELETE'])
 def delete_all_transfers():
     transfers = Transfer.query.all()
+    # delete all transfers
     for transfer in transfers:
         db.session.delete(transfer)
-    db.session.delete(transfer)
+
+    # delete all running transfers
+    global transfer_runners
+    with runner_lock:
+        for transfer_id in transfer_runners:
+            transfer_runners[transfer_id].cancel()
+            transfer_runners[transfer_id].shutdown()
+            del transfer_runners[transfer_id]
     try:
         db.session.commit()
     except sqlalchemy.exc.IntegrityError:
@@ -294,11 +234,7 @@ def get_latency(sender_id, receiver_id):
     return response.json()
 
 @app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
-def transfer(tool,sender_id, receiver_id):
-    global thread_executor_pools
-    global gparams
-    global last_sizes   
-    
+def transfer(tool,sender_id, receiver_id):    
     data = request.get_json()
     srcfiles = data.pop('srcfile')
     dstfiles = data.pop('dstfile')
@@ -314,35 +250,44 @@ def transfer(tool,sender_id, receiver_id):
     else:
         timeout = None
 
-    # resultset = []    
-    # filesizes = [i for i in files if i['name'] in srcfiles ]
-
     if type(srcfiles) != list:
         abort(make_response(jsonify(message="Malformed source file list"), 400))
     if type(dstfiles) != list:
-        abort(make_response(jsonify(message="Malformed destionation file list"), 400))
+        abort(make_response(jsonify(message="Malformed destination file list"), 400))
     if len(srcfiles) != len(dstfiles):
         abort(make_response(jsonify(message="Source and destination file sizes are not matching"), 400))
     
     if 'num_workers' in data:
         if type(data['num_workers']) != int or data['num_workers'] <= 0:
             abort(make_response(jsonify(message="num_workers should be int larger than 0"), 400))
-        else:  
-            num_workers = data['num_workers']                   
+        elif data['num_workers'] > 999:
+            # limitation of the agent - currently only a port range of 1000 is set aside for most tools
+            abort(make_response(jsonify(message="num_workers should be int smaller than 1000"), 400))
+        else:
+            num_workers = data['num_workers']
     else:
-        num_workers = len(srcfiles)
+        num_workers = min(len(srcfiles), 999)
         data['num_workers'] = num_workers
 
     if 'blocksize' in data:
         try: 
             logging.debug('Setting blocksize to %s' % data['blocksize'])
-            gparams['blocksize'] = int(data['blocksize'])
+            data['blocksize'] = int(data['blocksize'])
         except Exception:
             abort(make_response(jsonify(message="blocksize should be integer"), 400))
 
     latency = get_latency(sender.id, receiver.id)['latency']    
-    new_transfer = Transfer(sender_id = sender.id, receiver_id = receiver.id, start_time = datetime.datetime.utcnow(), end_time = None, 
-    file_size = None, num_files = len(srcfiles), tool=tool, num_workers = num_workers, latency = latency, worker_type_id = worker_type)    
+    new_transfer = Transfer(
+        sender_id=sender.id,
+        receiver_id=receiver.id,
+        start_time=datetime.datetime.utcnow(),
+        end_time=None, 
+        file_size=None,
+        num_files=len(srcfiles),
+        tool=tool,
+        num_workers=num_workers,
+        latency=latency,
+        worker_type_id=worker_type)
     db.session.add(new_transfer)
     try:
         db.session.commit()
@@ -350,114 +295,94 @@ def transfer(tool,sender_id, receiver_id):
         traceback.print_exc()
         abort(make_response(jsonify(message="Unable to log transfer"), 400))   
     
-    executor = libs.ThreadExecutor.ThreadPoolExecutor(max_workers=num_workers)
-    
     # authorization for sender and receiver
     sender_token = data.get('sender_token')
     receiver_token = data.get('receiver_token')
 
-    # start transfer job
-    future_to_transfer = {
-        executor.submit(transfer_job, sender.man_addr, sender.data_addr, receiver.man_addr, srcfile, dstfile, tool, data,
-            timeout=timeout, sender_token=sender_token, receiver_token=receiver_token): 
-        (srcfile,dstfile) for srcfile,dstfile in zip(srcfiles, dstfiles)
-        }
-    thread_executor_pools[new_transfer.id] = [executor, future_to_transfer]
-    last_sizes[new_transfer.id] = (datetime.datetime.utcnow(), 0)
+    global transfer_runners
+    with runner_lock:
+        transfer_runners[new_transfer.id] = TransferRunner(
+            new_transfer.id,
+            Sender(sender.man_addr, sender.data_addr, sender_token),
+            Receiver(receiver.man_addr, receiver_token),
+            srcfiles,
+            dstfiles,
+            tool,
+            data,
+            num_workers=num_workers,
+            timeout=timeout
+            )
     return jsonify({'result' : True, 'transfer' : new_transfer.id})
 
 @app.route('/wait/<int:transfer_id>', methods=['POST'])
 def wait(transfer_id):
-    global thread_executor_pools
-    transfer = Transfer.query.get_or_404(transfer_id)
-    failed_files = []
+    global transfer_runners
+    if transfer_id not in transfer_runners:
+        abort(make_response(jsonify(message="Transfer ID not found")), 404)
 
-    file_size = 0
-    end_time = None
-
-    executor, future_to_transfer =  thread_executor_pools[transfer_id]
-    for future in concurrent.futures.as_completed(future_to_transfer):
-        srcfile,dstfile = future_to_transfer[future]
+    with runner_lock:
+        transfer = Transfer.query.get_or_404(transfer_id)
+        transfer_runners[transfer_id].wait()
+        transfer_runners[transfer_id].shutdown()
+        transfer.file_size = transfer_runners[transfer_id].transfer_size
+        transfer.end_time = transfer_runners[transfer_id].end_time
+        failed_files = transfer_runners[transfer_id].failed_files
+        if len(failed_files) > 0 and failed_files[0] is not None:
+            failed_files = sorted(failed_files)
         try:
-            result, t_end_time = future.result()            
-        except Exception as exc:
-            logging.debug('%r generated an exception: %s' % (srcfile, exc))
-            failed_files.append(srcfile)
-        else:
-            if 'size' in result:
-                file_size += result['size']                
-            if end_time == None or end_time < t_end_time: 
-                end_time = t_end_time            
-
-    executor.shutdown()
-    del thread_executor_pools[transfer_id]
-        
-    transfer.file_size = file_size
-    transfer.end_time = end_time
-    try:
-        db.session.commit()
-    except sqlalchemy.exc.IntegrityError:
-        traceback.print_exc()
-        abort(make_response(jsonify(message="Unable to update transfer"), 400))   
-    
-    return jsonify({'result' : True, 'failed' : failed_files})
-
+            db.session.commit()
+            return jsonify({'result': True, 'failed': failed_files})
+        except sqlalchemy.exc.IntegrityError:
+            traceback.print_exc()
+            abort(make_response(jsonify(message="Unable to update transfer"), 400))   
+        finally:
+            del transfer_runners[transfer_id]        
 
 @app.route('/check/<int:transfer_id>', methods=['GET'])
 def check(transfer_id):    
-    global last_sizes
-    if transfer_id not in thread_executor_pools:
-        return {'Unfinished' : 0}
-    states = [i._state for i in thread_executor_pools[transfer_id][1]]
-    finished = states.count('FINISHED')
-
-    curr_size = 0
-    for transfer in thread_executor_pools[transfer_id][1]:
-        if not transfer.done(): continue
-        result, _ = transfer.result()
-        curr_size += result.get('size', 0)
-    last_t, last_size = last_sizes[transfer_id]
-    last_sizes[transfer_id] = (datetime.datetime.utcnow(), curr_size)
-    throughput = (curr_size - last_size) / (datetime.datetime.utcnow() - last_t).seconds
-    return jsonify({'Finished': finished , 'Unfinished' : len(states) - finished, 'throughput' : throughput})
+    if transfer_id not in transfer_runners:
+        return {'Unfinished': 0}
+    
+    return jsonify(transfer_runners[transfer_id].poll())
 
 @app.route('/running', methods=['GET'])
 def get_running_transfer():
-    transfers = []
-    for i in thread_executor_pools:
-        transfers.append(i)
-    return jsonify(transfers)
+    return jsonify([id for id in transfer_runners])
 
 @app.route('/transfer/<int:transfer_id>/scale/', methods=['POST'])
-def scale_transfer(transfer_id):    
-    global thread_executor_pools
-    global gparams
+def scale_transfer(transfer_id):
     data = request.get_json()
     if 'num_workers' not in data and 'blocksize' not in data: 
         abort(make_response(jsonify(message="num_workers or blocksize is required"), 400))
-        
-    if 'num_workers' in data:    
+
+    if transfer_id not in transfer_runners:
+        abort(make_response(jsonify(message="Transfer ID not found")), 404)
+
+    if 'num_workers' in data:
         try: 
             num_workers = int(data['num_workers'])
         except Exception:
             abort(make_response(jsonify(message="num_workers should be integer"), 400))
         
         logging.debug('Setting num_workers to %s' % num_workers)
-        executor, _, _ = thread_executor_pools[transfer_id]
-        executor.set_max_workers(num_workers)
+        with runner_lock:
+            transfer_runners[transfer_id].scale(num_workers)
     
     if 'blocksize' in data:
+        # TODO fix new TransferRunner to modify blocksizes
+        abort(make_response(jsonify(message="blocksize change not yet supported")))
+
         try: 
             blocksize = int(data['blocksize'])
         except Exception:
             abort(make_response(jsonify(message="blocksize should be integer"), 400))
 
         logging.debug('Setting blocksize to %s' % blocksize)
-        gparams['blocksize'] = blocksize
+        #gparams['blocksize'] = blocksize
 
     return ''
 
 init_db()
 
 if __name__ == '__main__':
-    app.run('0.0.0.0')
+    app.run('0.0.0.0', port=5001)

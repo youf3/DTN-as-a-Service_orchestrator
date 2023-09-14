@@ -64,7 +64,7 @@ class _WorkItem(object):
 def _worker(executor_reference, work_queue):
     try:
         while True:
-            if len(executor_reference()._threads) > executor_reference()._max_workers and executor_reference()._exit_lock.acquire(blocking=False) :
+            if not executor_reference() or (len(executor_reference()._threads) > executor_reference()._max_workers and executor_reference()._exit_lock.acquire(blocking=False)):
                 _base.LOGGER.info('removing executor')
                 return    
             work_item = work_queue.get(block=True)
@@ -171,9 +171,22 @@ class ThreadPoolExecutor(_base.Executor):
             self._threads.append(t)
             _threads_queues[t] = self._work_queue
 
-    def shutdown(self, wait=True):
+    def shutdown(self, wait=True, cancel_futures=False):
         with self._shutdown_lock:
             self._shutdown = True
+            if cancel_futures:
+                # Drain all work items from the queue, and then cancel their
+                # associated futures.
+                while True:
+                    try:
+                        work_item = self._work_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if work_item is not None:
+                        work_item.future.cancel()
+
+            # Send a wake-up to prevent threads calling
+            # _work_queue.get(block=True) from permanently blocking.
             self._work_queue.put(None)
         if wait:
             for t in self._threads:
