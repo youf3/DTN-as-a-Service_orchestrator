@@ -347,7 +347,7 @@ class Connection(object):
         self._status = "disconnected"
         pass # nothing needed on disconnection
 
-    def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, min_size=None, max_size=None):
+    def copy(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, compression=None, zerocopy=False, require_stats=False, min_size=None, max_size=None):
         """
         Copy all files from a sender DTN's source directory to a receiver DTN's destination directory.
         This starts a file transfer between two DTNs, and provides data to track transfer progress.
@@ -357,6 +357,7 @@ class Connection(object):
         :limit: Optional limit on number of directories/files to copy.
         :num_workers: Number of worker processes to facilitate the transfer.
         :blocksize: Block size for the transfer in bytes.
+        :compression: Optional compression algorithm, one of (gzip, bzip2, lzma).
         :zerocopy: Zerocopy setting for nuttcp.
         :require_stats: If True, fail the copy if statistics cannot be retrieved.
         :min_size: If set, don't copy files below this size (in bytes).
@@ -402,6 +403,7 @@ class Connection(object):
             # get latency and blocksize for metrics later
             self.latency = self.orchestrator.ping(self.sender, self.receiver).get('latency')
             self.blocksize = blocksize
+            self.compression = compression
 
             pre_dataframe = self.extractor.extract(self.sender, self.receiver)
             self.pre_csv = pre_dataframe.to_csv(header=True, index=False)
@@ -412,7 +414,7 @@ class Connection(object):
 
         self.transfer_id = self.orchestrator.transfer(complete_source_files, complete_destination_files,
                 self.sender.id, self.receiver.id, tool=self.tool,
-                num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy)
+                num_workers=num_workers, blocksize=blocksize, compression=compression, zerocopy=zerocopy)
         self._status = "copy initiated"
         return Transfer(self.transfer_id, complete_source_files, complete_destination_files)
 
@@ -549,7 +551,7 @@ class Connection(object):
                 self._status = f"Copy finished with {len(result['failed'])} failures"
             return result
 
-    def copy_and_wait(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, min_size=None, max_size=None):
+    def copy_and_wait(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, compression=None, zerocopy=False, require_stats=False, min_size=None, max_size=None):
         """
         Similar to copy(), except instead of a nonblocking function that returns a Transfer object 
         this is a blocking object that waits until the transfer is complete.
@@ -557,7 +559,7 @@ class Connection(object):
         copy_and_wait() accepts the same arguments as copy().
         """
         copydata = self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers,
-            blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats, min_size=min_size, max_size=max_size)
+            blocksize=blocksize, compression=compression, zerocopy=zerocopy, require_stats=require_stats, min_size=min_size, max_size=max_size)
         print(f'Started transfer #{copydata.id}')
 
         finished = False
@@ -577,7 +579,7 @@ class Connection(object):
         # get stats and return
         return self.get(), self.get_stats()
 
-    def copy_multi_stream(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, zerocopy=False, require_stats=False, stream_sizes=[]):
+    def copy_multi_stream(self, sourcedir, destinationdir, limit=None, num_workers=1, blocksize=8192, compression=None, zerocopy=False, require_stats=False, stream_sizes=[]):
         """
         Start multiple copy() streams, with each stream copying files of various sizes.
         Example:
@@ -594,7 +596,7 @@ class Connection(object):
         """
         if len(stream_sizes) == 0:
             # just return a single stream
-            return [self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats)]
+            return [self.copy(sourcedir, destinationdir, limit=limit, num_workers=num_workers, blocksize=blocksize, compression=compression, zerocopy=zerocopy, require_stats=require_stats)]
         else:
             current_min = None
             current_max = None
@@ -604,12 +606,12 @@ class Connection(object):
                 current_max = size
                 copies.append(self.copy(
                     sourcedir, destinationdir,
-                    limit=limit, num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats,
+                    limit=limit, num_workers=num_workers, blocksize=blocksize, compression=compression, zerocopy=zerocopy, require_stats=require_stats,
                     min_size=current_min, max_size=current_max))
             # last iteration
             copies.append(self.copy(
                         sourcedir, destinationdir,
-                        limit=limit, num_workers=num_workers, blocksize=blocksize, zerocopy=zerocopy, require_stats=require_stats,
+                        limit=limit, num_workers=num_workers, blocksize=blocksize, compression=compression, zerocopy=zerocopy, require_stats=require_stats,
                         min_size=current_max, max_size=None))
             return copies
 
@@ -987,7 +989,7 @@ class DTNOrchestratorClient(object):
             raise Exception("Orchestrator worker timed out") from None
 
     def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, 
-            num_workers=1, blocksize=8192, zerocopy=False, duration=None):
+            num_workers=1, blocksize=8192, compression=None, zerocopy=False, duration=None):
         """
         Initiate a transfer between two DTNs with specific lists of files.
 
@@ -999,6 +1001,7 @@ class DTNOrchestratorClient(object):
         :remote_mount: Optional remote mount location for NVMEoF connections.
         :num_workers: Number of worker processes to facilitate the transfer.
         :blocksize: Block size for the transfer in bytes.
+        :compression: Optional compression algorithm, one of (gzip, bzip2, lzma).
         :zerocopy: Zerocopy setting for nuttcp.
         """
         sender = self._id2dtn(sender)
@@ -1018,6 +1021,7 @@ class DTNOrchestratorClient(object):
                 "remote_mount": remote_mount,
                 "num_workers": num_workers,
                 "blocksize": blocksize,
+                "compression": compression,
                 "zerocopy": zerocopy,
                 "duration": duration
             },

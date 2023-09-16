@@ -64,6 +64,7 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
             rcv_payload['address'] = sender.data_addr
             rcv_payload['file'] = dstfile
             rcv_payload['blocksize'] = params['blocksize']
+            rcv_payload['compression'] = params.get('compression', None)
 
             logging.debug(f"Runner {get_ident()}: receiver request {receiver.addr} {rcv_payload['file']} ({rcv_payload['cport'] if 'cport' in rcv_payload else ''}, {rcv_payload['dport'] if 'dport' in rcv_payload else ''})")
             response = receiver_session.post(
