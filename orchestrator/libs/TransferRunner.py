@@ -26,6 +26,8 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
     if not srcfile and not dstfile:
         retry = 1
     for i in range(retry):
+        sender_session = requests.Session()
+        receiver_session = requests.Session()
         try:
             # ensure this data is thread-specific
             params['file'] = srcfile
@@ -35,10 +37,10 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
                 params['file'] = srcfile.replace(params['remote_mount'], "")
             
             # requests Sessions with connection pooling - reuse TCP connections for more performance
-            sender_session = requests.Session()
-            sender_session.headers.update(({"Authorization": f"Bearer {sender.token}"} if sender.token else None))
-            receiver_session = requests.Session()
-            receiver_session.headers.update(({"Authorization": f"Bearer {receiver.token}"} if receiver.token else None))
+            if sender.token:
+                sender_session.headers.update({"Authorization": f"Bearer {sender.token}"})
+            if receiver.token:
+                receiver_session.headers.update({"Authorization": f"Bearer {receiver.token}"})
 
             # set up sender
             logging.debug(f"Runner {get_ident()}: attempt={i} sender request {sender.addr} {params['file']}")
@@ -159,7 +161,7 @@ class TransferRunner(object):
         self.executor = ThreadPoolExecutor(max_workers=self.num_workers)
         for job in self.joblist:
             future = self.executor.submit(
-                transfer_function, sender, receiver, job[0], job[1], tool, params, timeout=timeout)
+                transfer_function, self.sender, self.receiver, job[0], job[1], tool, params, timeout=timeout)
             self.futures.add(future)
             self.futures_files[future] = job[0]
         logging.debug(f"Runner: started transfer ID {self.id}")
