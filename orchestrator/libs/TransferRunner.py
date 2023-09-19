@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 import os
 import requests
@@ -22,6 +23,8 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
         raise ValueError("params requires blocksize")
     if not srcfile and 'duration' not in params:
         raise ValueError("params requires duration if no sourcefile given")
+
+    max_poll_retries = int(params.get('max_poll_retries', 100))
     # no retries if this is a mem-to-mem copy
     if not srcfile and not dstfile:
         retry = 1
@@ -36,6 +39,14 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
                 # since that's only valid on the receiver side
                 params['file'] = srcfile.replace(params['remote_mount'], "")
             
+            # set sender IPv6 if the address is IPv6
+            try:
+                if params.get('ipv6', None) is None:
+                    params['ipv6'] = isinstance(ipaddress.ip_address(sender.data_addr), ipaddress.IPv6Address)
+            except ValueError:
+                print(f"Warning: can't determine if {sender.data_addr} is an IPv6 address")
+                params['ipv6'] = False
+
             # requests Sessions with connection pooling - reuse TCP connections for more performance
             if sender.token:
                 sender_session.headers.update({"Authorization": f"Bearer {sender.token}"})
@@ -77,9 +88,10 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
             if srcfile != None:
                 receiver_check['size'] = file_size
 
-            logging.debug(f"Runner {get_ident()}: receiver response {dstfile} ({response['cport'] if 'cport' in response else ''}, {response['dport'] if 'dport' in response else ''})")
+            logging.debug(f"Runner {get_ident()}: receiver response {response.status_code} {dstfile} ({response['cport'] if 'cport' in response else ''}, {response['dport'] if 'dport' in response else ''})")
 
             if response.status_code != 200 or receiver_check.pop('result') != True:
+                logging.debug(f"Runner {get_ident()}: receiver error: {response.text}")
                 raise TransferException("Unable to start receiver")
 
             # at this point, the file transfer should have been started - check status
@@ -89,18 +101,30 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
             port = receiver_check['cport']
 
             # check transfer status with the receiver
-            transfer_status = receiver_session.get(
-                f"http://{receiver.addr}/{tool}/poll",
-                json=receiver_check)
-
-            if transfer_status.status_code != 200 or transfer_status.json()[0] != 0:
-                # something went wrong, make sure we clean up before retrying
-                response = sender_session.get(
-                    f"http://{sender.addr}/free_port/{tool}/{port}",
+            poll_retry = 0
+            while poll_retry < max_poll_retries:
+                transfer_status = receiver_session.get(
+                    f"http://{receiver.addr}/{tool}/poll",
                     json=receiver_check)
-                if response.status_code != 200:
-                    raise TransferException(f"Transfer and sender cleanup failed for port {port}, HTTP {response.status_code}: {response.text}")
-                raise TransferException(f"Transfer has failed for port {port}, HTTP {transfer_status.status_code}: {transfer_status.text}")
+                if transfer_status.status_code == 200:
+                    break
+                elif transfer_status.status_code == 503:
+                    # poll timed out, retry
+                    poll_retry += 1
+                    continue
+                elif transfer_status.status_code != 200 or transfer_status.json()[0] != 0:
+                    # something went wrong, make sure we clean up before retrying
+                    response = sender_session.get(
+                        f"http://{sender.addr}/free_port/{tool}/{port}",
+                        json=receiver_check)
+                    if response.status_code != 200:
+                        raise TransferException(f"Transfer and sender cleanup failed for port {port}, HTTP {response.status_code}: {response.text}")
+                    raise TransferException(f"Transfer has failed for port {port}, HTTP {transfer_status.status_code}: {transfer_status.text}")
+                else:
+                    raise TransferException(f"Unhandled status for port {port}, HTTP {transfer_status.status_code}: {transfer_status.text}")
+
+            if poll_retry >= max_poll_retries:
+                raise TransferException(f"Transfer expired for port {port}, retries={poll_retry}")
 
             sender_check = receiver_check
             sender_check['node'] = 'sender'
@@ -185,7 +209,8 @@ class TransferRunner(object):
                     self.finished_count += 1
                 elif future.cancelled():
                     self.cancelled_count += 1
-                self.transfer_size += result.get('size', 0)
+                # need the (... or 0) in case result['size'] is None
+                self.transfer_size += (result.get('size', 0) or 0)
                 if self.end_time is None or end_time > self.end_time:
                     self.end_time = end_time
             except CancelledError:
@@ -193,7 +218,7 @@ class TransferRunner(object):
                 self.cancelled_count += 1
                 self.failed_files.append(srcfile)
             except Exception as exc:
-                logging.debug(f"Runner: failed transfer on {srcfile}: {exc}")
+                logging.error(f"Runner: failed transfer on {srcfile}: {exc}", exc_info=True)
                 self.failed_files.append(srcfile)
             finally:
                 del self.futures_files[future]
@@ -209,7 +234,7 @@ class TransferRunner(object):
             throughput = 0
         return {
             'Finished': self.finished_count,
-            'Unfinished': len(self.futures) - self.finished_count - len(self.failed_files),
+            'Unfinished': max(0, (len(self.futures) - self.finished_count - len(self.failed_files))),
             'Cancelled': self.cancelled_count,
             'Failed': len(self.failed_files),
             'throughput': throughput,
