@@ -230,8 +230,46 @@ def get_latency(sender_id, receiver_id):
     sender = DTN.query.get_or_404(sender_id)
     receiver = DTN.query.get_or_404(receiver_id)
     response = requests.get('http://{}/ping/{}'.format(sender.man_addr, receiver.data_addr),
-        headers=({"Authorization": request.headers.get('Authorization')} if request.headers.get('Authorization') else None))    
+        headers=({"Authorization": request.headers.get('Authorization')} if request.headers.get('Authorization') else None))
     return response.json()
+
+@app.route('/files/<int:dtn_id>', defaults={'path': ''})
+@app.route('/files/<int:dtn_id>/<path:path>')
+def get_dtn_files(dtn_id, path):
+    # proxy API endpoint for DTNs
+    dtn = DTN.query.get_or_404(dtn_id)
+    result = requests.get(
+            f"http://{dtn.man_addr}/files/{path}",
+            headers=({"Authorization": request.headers.get('Authorization')} if request.headers.get('Authorization') else None))
+    if result.status_code == 200:
+        return result.json()
+    else:
+        abort(make_response(jsonify(message=f"error listing files: {result.text}")), result.status_code)
+
+@app.route('/create_dir/<int:dtn_id>', methods=['POST'])
+def create_dir(dtn_id):
+    # proxy API endpoint for DTNs
+    dtn = DTN.query.get_or_404(dtn_id)
+    result = requests.post(
+        f"http://{dtn.man_addr}/create_dir",
+        json=request.get_json(),
+        headers=({"Authorization": request.headers.get('Authorization')} if request.headers.get('Authorization') else None))
+    if result.status_code == 200:
+        return ''
+    else:
+        abort(make_response(jsonify(message=f"error creating directories: {result.text}")), result.status_code)
+
+@app.route('/cleanup/<int:dtn_id>/<string:tool>', methods=['GET'])
+def cleanup(dtn_id, tool):
+    # proxy API endpoint for DTNs
+    dtn = DTN.query.get_or_404(dtn_id)
+    result = requests.get(
+        f"http://{dtn.man_addr}/cleanup/{tool}",
+        headers=({"Authorization": request.headers.get('Authorization')} if request.headers.get('Authorization') else None))
+    if result.status_code == 200:
+        return ''
+    else:
+        abort(make_response(jsonify(message=f"error running cleanup: {result.text}")), result.status_code)
 
 @app.route('/transfer/<string:tool>/<int:sender_id>/<int:receiver_id>', methods=['POST'])
 def transfer(tool,sender_id, receiver_id):    

@@ -22,15 +22,6 @@ TIMEOUT = 30
 #  This hardcoded/static map is needed since Prometheus jobs are different from
 #  the actual hostnames and registered DTN names.
 PROMETHEUS_JOBS = {
-    "138.44.15.78": "aarnet01",
-    "74.114.96.98": "starlight01",
-    "109.171.131.68": "kaust01",
-    "210.119.23.12": "kisti01",
-    "145.146.1.10:": "uva01",
-    "213.135.51.226": "icm01",
-    "193.166.254.54": "csc01",
-    "193.166.254.50": "csc02",
-    "103.72.192.66": "nscc01"
 }
 
 class DTN(object):
@@ -100,14 +91,7 @@ class DTN(object):
         type (file or dir) and size.
         """
         # TODO permissions checking
-        result = requests.get(
-            f"http://{self.man_addr}/files/{filedir if filedir else ''}",
-            headers=self._token_header(),
-            timeout=TIMEOUT)
-        if result.status_code == 200:
-            return result.json()
-        else:
-            raise Exception(result.text)
+        return self._client.get_files(self.id, filedir)
 
     def create_dirs(self, dirlist):
         """
@@ -115,13 +99,7 @@ class DTN(object):
 
         :param dirlist: List of directories to create.
         """
-        mkdir_result = requests.post(
-            f"http://{self.man_addr}/create_dir/",
-            headers=self._token_header(),
-            json=dirlist,
-            timeout=TIMEOUT)
-        if mkdir_result.status_code != 200:
-            raise Exception(f"Error creating directories, code {mkdir_result.status_code} ({mkdir_result.text})") from None
+        return self._client.create_dirs(self.id, dirlist)
 
     def ping(self, remote_id):
         """
@@ -273,17 +251,21 @@ class StatsExtractor(object):
         'or label_replace(avg by (job)((node_hwmon_temp_celsius{{instance=~"{5}.*"}})), "Receiver_CPU_temp", "$0", "job", "(.+)") '
         'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="{4}"}}), "Sender_CPU_number", "$0", "job", "(.+)") '
         'or label_replace(count without(cpu, mode) (node_cpu_seconds_total{{mode="idle", job="{5}"}}), "Receiver_CPU_number", "$0", "job", "(.+)") '
-        'or label_replace(avg(irate(node_cpu_seconds_total{{mode="iowait", instance="{4}"}}[{1}m])),"Sender_CPU_IO_wait_util", "$0", "job", "(.+)") '
-        'or label_replace(avg(irate(node_cpu_seconds_total{{mode="iowait", instance="{5}"}}[{1}m])),"Receiver_CPU_IO_wait_util", "$0", "job", "(.+)") '
-        'or label_replace(avg(irate(node_disk_io_time_weighted_seconds_total{{instance="{5}"}}[{1}m])),"Receiver_Disk_IO_time_Weighted", "$0", "job", "(.+)") '
+        'or label_replace(avg by (job)(irate(node_cpu_seconds_total{{mode="iowait", instance=~"{4}"}}[{1}m])), "Average_sender_CPU_IO_wait_util", "$0", "job", "(.+)") '
+        'or label_replace(avg by (job)(irate(node_cpu_seconds_total{{mode="iowait", instance=~"{5}"}}[{1}m])), "Average_receiver_CPU_IO_wait_util", "$0", "job", "(.+)") '
+        'or label_replace(avg by (job)(irate(node_disk_io_time_weighted_seconds_total{{instance=~"{4}"}}[{1}m])), "Sender_avgqu_length", "$0", "job", "(.+)") '
+        'or label_replace(avg by (job)(irate(node_disk_io_time_weighted_seconds_total{{instance=~"{5}"}}[{1}m])), "Receiver_avgqu_length", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_cpu_seconds_total{{mode="system", instance=~"{4}"}}[{1}m])), "Sender_system_CPU", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_cpu_seconds_total{{mode="system", instance=~"{5}"}}[{1}m])), "Receiver_system_CPU", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_cpu_seconds_total{{mode="user", instance=~"{4}"}}[{1}m])), "Sender_user_CPU", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_cpu_seconds_total{{mode="user", instance=~"{5}"}}[{1}m])), "Receiver_user_CPU", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_written_bytes_total{{device=~"nvme.*", instance=~"{5}"}}[{1}m])), "Sender_disk_read", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_read_bytes_total{{device=~"nvme.*", instance=~"{4}"}}[{1}m])), "Receiver_disk_write", "$0", "job", "(.+)") '
+        'or label_replace(sum by (job)(irate(node_disk_read_time_seconds_total{{device=~"nvme.*", instance=~"{4}"}}[{1}m]) / irate(node_disk_reads_completed_total{{device="md0", instance=~"{4}"}}[{1}m])), "Sender_disk_request_avg_proc_time", "$0", "job", "(.+)")  '
+        'or label_replace(sum by (job)(irate(node_disk_write_time_seconds_total{{device=~"nvme.*", instance=~"{5}"}}[{1}m]) / irate(node_disk_writes_completed_total{{device="md0", instance=~"{5}"}}[{1}m])), "Receiver_disk_request_avg_proc_time", "$0", "job", "(.+)")  '
         '').format(sender.name, AVG_INT, sender.interface, 'dtnaas', sender_mon_addr, receiver_mon_addr, PROMETHEUS_JOBS.get(sender.man_addr.split(':')[0]), receiver.name, receiver.interface)
         dataset = None
 
-        # hacky fix for kisti-starlight connections
-        if "210.119.23.12" in sender.man_addr:
-            query = query.replace(f'transmit_bytes_total{{instance=~"{sender_mon_addr}.*", device="{sender.interface}"',
-                    f'receive_bytes_total{{job=~"{PROMETHEUS_JOBS.get(receiver.man_addr.split(":")[0])}", device="{receiver.interface}"')
-        
         while end_time > start_time:
             data_in_period = None
             max_ts = start_time + (STEP * MAX_RES) 
@@ -322,7 +304,7 @@ class Connection(object):
     Object that represents a connection between two DTNs. This connection can facilitate
     file transfers between these DTNs.
     """
-    def __init__(self, client, sender, receiver, setup=False, tool="nuttcp"):
+    def __init__(self, client, sender, receiver, setup=False, tool="nuttcp", extractor=None):
         self.orchestrator = client
         self.sender = sender
         self.receiver = receiver
@@ -330,7 +312,7 @@ class Connection(object):
         self.tool = tool
         self._status = "initialized"
 
-        self.extractor = StatsExtractor(client)
+        self.extractor = (extractor if extractor is not None else StatsExtractor(client))
         self.pre_csv = ""
         self.post_csv = ""
         self.latency = None
@@ -510,7 +492,25 @@ class Connection(object):
         if self.transfer_id:
             return self.orchestrator.get_transfer(self.transfer_id)
 
-    def get_stats(self, filename):
+    def get_stats_by_time(self, start_time, end_time):
+        """
+        Get transfer statistics from start and end time.
+
+        :param start_time: Start time in epoch seconds (float).
+        :param end_time: End time in epoch seconds (float).
+        """
+        post_dataframe = self.extractor.extract(self.sender, self.receiver,
+            start_time=start_time, end_time=end_time)
+        mean_df = pandas.DataFrame(post_dataframe.mean())
+        df_t = mean_df.T
+        df_t['latency']= self.latency
+
+        dataframe_detail = pandas.DataFrame(post_dataframe)
+        dataframe_detail['latency']= self.latency
+
+        return df_t, dataframe_detail
+
+    def get_stats(self, filename_1=None, filename_2=None):
         """
         Collect transfer statistics from Prometheus.
         """
@@ -520,19 +520,38 @@ class Connection(object):
         # modify the dataframe before saving
         mean_df = pandas.DataFrame(post_dataframe.mean())
         df_t = mean_df.T
+        df_t['transfer_id'] = finish_data['id']
         df_t['num_workers']= finish_data['num_workers']
         df_t['num_files']= finish_data['num_files']
         df_t['blocksize']= self.blocksize
         df_t['latency']= self.latency
         df_t['start_time'] = finish_data['start_time']
         df_t['end_time'] = finish_data['end_time']
+        df_t['elapsed_time'] = finish_data['elapsed_time']
         
-        if not os.path.exists(filename):
-            df_t.to_csv(filename, index=False)
-        else:
-            df_t.to_csv(filename, index=False, header=False, mode="a")
+        dataframe_detail = pandas.DataFrame(post_dataframe)
+        dataframe_detail['transfer_id'] = finish_data['id']
+        dataframe_detail['num_workers']= finish_data['num_workers']
+        dataframe_detail['num_files']= finish_data['num_files']
+        dataframe_detail['blocksize']= self.blocksize
+        dataframe_detail['latency']= self.latency
+        dataframe_detail['start_time'] = finish_data['start_time']
+        dataframe_detail['end_time'] = finish_data['end_time']
+        dataframe_detail['elapsed_time'] = finish_data['elapsed_time']
 
-        return df_t
+        if filename_1 != None:
+            if not os.path.exists(filename_1):
+                df_t.to_csv(filename_1, index=False)
+            else:
+                df_t.to_csv(filename_1, index=False, header=False, mode="a")
+        
+        if filename_2 != None:
+            if not os.path.exists(filename_2):
+                dataframe_detail.to_csv(filename_2, index=False)
+            else:
+                dataframe_detail.to_csv(filename_2, index=False, header=False, mode="a")  
+
+        return df_t, dataframe_detail
 
     def finish(self, cleanup=False):
         """
@@ -735,11 +754,13 @@ class DTNOrchestratorClient(object):
         else:
             return self.get_dtn(id_or_dtn)
 
-    def check(self):
+    def check(self, timeout=None):
         """
         Check connection status between this host and the orchestrator.
+        
+        :param timeout: Optional timeout in seconds.
         """
-        result = requests.get(self.base_url)
+        result = requests.get(self.base_url, timeout=timeout)
         if result.status_code == 200:
             return "OK"
         else:
@@ -863,19 +884,20 @@ class DTNOrchestratorClient(object):
         receiver = self._id2dtn(receiver)
         return NVMEConnection(self, sender, receiver)
 
-    def setup_connection(self, sender, receiver, tool="nuttcp"):
+    def setup_connection(self, sender, receiver, tool="nuttcp", extractor=None):
         """
         Set up a transfer connection between two DTNs.
 
         :param sender: Sender DTN object or ID.
         :param receiver: Receiver DTN object or ID.
         :param tool: Optional tool name, this will be used for the file transfer.
+        :param extractor: Optional StatsExtractor object. If none this will create a default extractor.
 
         :returns: A configured Connection object.
         """
         sender = self._id2dtn(sender)
         receiver = self._id2dtn(receiver)
-        return Connection(self, sender, receiver, tool=tool)
+        return Connection(self, sender, receiver, tool=tool, extractor=extractor)
 
     def get_transfers(self):
         """
@@ -938,8 +960,8 @@ class DTNOrchestratorClient(object):
             # TODO don't assume nuttcp as the transfer tool
             if sender and tool:
                 sender = self._id2dtn(sender)
-                requests.get(f"{sender.man_addr}/cleanup/{tool}", headers=sender._token_header(), timeout=TIMEOUT)
-            
+                requests.get(self.base_url + f"cleanup/{sender.id}/{tool}", headers=sender._token_header(), timeout=TIMEOUT)
+
             wait_data = requests.post(self.base_url + f"wait/{transfer_id}")
             if wait_data.status_code == 200:
                 return wait_data.json()
@@ -987,6 +1009,40 @@ class DTNOrchestratorClient(object):
                 raise Exception(f"Error {result.status_code} running ping from {sender.name}") from None
         except RemoteDisconnected:
             raise Exception("Orchestrator worker timed out") from None
+
+    def get_files(self, dtn, path=None):
+        """
+        Get a file listing from a DTN.
+
+        :param dtn: DTN object or DTN ID.
+        :param path: Optional path/subdirectory on the DTN.
+        """
+        # TODO permissions checking
+        dtn = self._id2dtn(dtn)
+        result = requests.get(
+            self.base_url + f"files/{dtn.id}{'/' + path if path else ''}",
+            headers=dtn._token_header(),
+            timeout=TIMEOUT)
+        if result.status_code == 200:
+            return result.json()
+        else:
+            raise Exception(result.text)
+
+    def create_dirs(self, dtn, dirlist):
+        """
+        Create directories on a DTN.
+
+        :param dtn: DTN object or DTN ID.
+        :param dirlist: List of directories to create.
+        """
+        dtn = self._id2dtn(dtn)
+        mkdir_result = requests.post(
+            self.base_url + f"create_dir/{dtn.id}",
+            headers=dtn._token_header(),
+            json=dirlist,
+            timeout=TIMEOUT)
+        if mkdir_result.status_code != 200:
+            raise Exception(f"Error creating directories, code {mkdir_result.status_code} ({mkdir_result.text})") from None
 
     def transfer(self, sourcefiles, destfiles, sender, receiver, tool="nuttcp", remote_mount=None, 
             num_workers=1, blocksize=8192, compression=None, zerocopy=False, duration=None):
