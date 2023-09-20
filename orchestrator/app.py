@@ -174,6 +174,18 @@ def get_transfer_for_tool(tool):
         }
     return jsonify(data)
 
+@app.route('/transfer/cancel/<int:transfer_id>', methods=['POST'])
+def cancel_transfer(transfer_id):
+    global transfer_runners
+    with runner_lock:
+        if transfer_id in transfer_runners:
+            transfer_runners[transfer_id].cancel()
+            transfer_runners[transfer_id].shutdown()
+            del transfer_runners[transfer_id]
+            return 'transfer cancelled'
+        else:
+            abort(make_response(jsonify(message="transfer not found"), 404))
+
 @app.route('/transfer/<int:transfer_id>',  methods=['DELETE'])
 def delete_transfer(transfer_id):
     # delete the database session
@@ -286,7 +298,8 @@ def transfer(tool,sender_id, receiver_id):
     if 'timeout' in data and type(data['timeout']) == int:
         timeout = data['timeout']
     else:
-        timeout = None
+        # default timeout (2 hours) so we don't hang ports for forever
+        timeout = 3600 * 2
 
     if type(srcfiles) != list:
         abort(make_response(jsonify(message="Malformed source file list"), 400))
@@ -419,6 +432,12 @@ def scale_transfer(transfer_id):
         #gparams['blocksize'] = blocksize
 
     return ''
+
+@app.route('/threads', methods=['GET'])
+def log_threads():
+    logging.debug(f"running threads: {list(transfer_runners.keys())}")
+    # don't return thread data to world!
+    return 'OK'
 
 init_db()
 
