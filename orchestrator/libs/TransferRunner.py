@@ -24,7 +24,11 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
     if not srcfile and 'duration' not in params:
         raise ValueError("params requires duration if no sourcefile given")
 
-    max_poll_retries = int(params.get('max_poll_retries', 100))
+    max_poll_retries = params.get('max_poll_retries', 100)
+    if max_poll_retries is None:
+        max_poll_retries = 100
+    else:
+        max_poll_retries = int(max_poll_retries)
     # no retries if this is a mem-to-mem copy
     if not srcfile and not dstfile:
         retry = 1
@@ -106,7 +110,7 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
                 transfer_status = receiver_session.get(
                     f"http://{receiver.addr}/{tool}/poll",
                     json=receiver_check)
-                if transfer_status.status_code == 200:
+                if transfer_status.status_code == 200 and transfer_status.json()[0] == 0:
                     break
                 elif transfer_status.status_code == 503:
                     # poll timed out, retry
@@ -114,12 +118,13 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
                     continue
                 elif transfer_status.status_code != 200 or transfer_status.json()[0] != 0:
                     # something went wrong, make sure we clean up before retrying
+                    logging.debug(f"Runner {get_ident()}: clean up sender, receiver exited code {transfer_status.json()[0] if transfer_status.status_code == 200 else transfer_status.status_code}")
                     response = sender_session.get(
                         f"http://{sender.addr}/free_port/{tool}/{port}",
-                        json=receiver_check)
+                        json=receiver_check, timeout=timeout)
                     if response.status_code != 200:
                         raise TransferException(f"Transfer and sender cleanup failed for port {port}, HTTP {response.status_code}: {response.text}")
-                    raise TransferException(f"Transfer has failed for port {port}, HTTP {transfer_status.status_code}: {transfer_status.text}")
+                    raise TransferException(f"Transfer has failed from receiver for port {port}, HTTP {transfer_status.status_code}: {transfer_status.text}")
                 else:
                     raise TransferException(f"Unhandled status for port {port}, HTTP {transfer_status.status_code}: {transfer_status.text}")
 
@@ -136,13 +141,26 @@ def _transfer_file(sender, receiver, srcfile, dstfile, tool, params, timeout=Non
             # check transfer status with the sender
             sndr_response = sender_session.get(
                 f"http://{sender.addr}/{tool}/poll",
-                json=sender_check)
+                json=sender_check, timeout=timeout)
             if sndr_response.status_code != 200 or sndr_response.json() != 0:
-                raise Exception('Transfer has failed')
+                raise Exception(f'Transfer has failed from sender for port {port}, HTTP {sndr_response.status_code}: {sndr_response.text}')
             logging.debug(f"Runner {get_ident()}: {params['file']} completed")
 
             # transfer complete
             return transfer_info, datetime.utcnow()
+        except requests.exceptions.ConnectTimeout as e:
+            logging.error(f"Agent timeout, {get_ident()}: {e.request.url}")
+            try:
+                if e.request.url == f"http://{sender.addr}/{tool}/poll":
+                    # sender failed, make sure we clean it up before retrying
+                    response = sender_session.get(
+                            f"http://{sender.addr}/free_port/{tool}/{port}",
+                            json=receiver_check, timeout=timeout)
+            except requests.exceptions.ConnectTimeout:
+                pass
+            logging.error(f"transfer exception, {sender.addr} -> {receiver.addr} {srcfile}: {e}")
+            time.sleep(0.5)
+            continue
         except TransferException as e:
             if isinstance(e, requests.exceptions.ConnectionError):
                 logging.error("Unable to connect to DTN")
